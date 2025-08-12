@@ -1,0 +1,161 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+model Sede {
+  id         Int       @id @default(autoincrement())
+  nombre     String    @unique
+  direccion  String?
+  telefono   String?
+  email      String?
+  activo     Boolean   @default(true)
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+  // 🆕 Campos para sincronización SAP
+  sedeSapId  String?   @unique
+  nombreSap  String?
+  areas      Area[]
+  usuarios   Usuario[]
+
+  @@map("sedes")
+}
+
+model Area {
+  id          Int       @id @default(autoincrement())
+  nombre      String
+  descripcion String?
+  activo      Boolean   @default(true)
+  sedeId      Int
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  areaSapId   Int?      @unique
+  nombreSap   String?
+  sede        Sede      @relation(fields: [sedeId], references: [id])
+  cargos      Cargo[]
+  usuarios    Usuario[]
+
+  @@unique([nombre, sedeId])
+  @@index([sedeId], map: "areas_sedeId_fkey")
+  @@map("areas")
+}
+
+model Cargo {
+  id                 Int       @id @default(autoincrement())
+  nombre             String
+  descripcion        String?
+  nivel              Int       @default(1)
+  activo             Boolean   @default(true)
+  areaId             Int
+  cargoSuperiorId    Int?
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+  rolId              Int
+  cargoSap           String?
+  sincronizadoSap    Boolean   @default(false)
+  area               Area      @relation(fields: [areaId], references: [id])
+  cargoSuperior      Cargo?    @relation("CargoHierarchy", fields: [cargoSuperiorId], references: [id])
+  cargosSubordinados Cargo[]   @relation("CargoHierarchy")
+  rol                Rol       @relation(fields: [rolId], references: [id])
+  usuarios           Usuario[]
+
+  @@unique([nombre, areaId])
+  @@unique([cargoSap, areaId])
+  @@index([areaId], map: "cargos_areaId_fkey")
+  @@index([cargoSuperiorId], map: "cargos_cargoSuperiorId_fkey")
+  @@index([rolId], map: "cargos_rolId_fkey")
+  @@map("cargos")
+}
+
+model Rol {
+  id          Int       @id @default(autoincrement())
+  nombre      String    @unique
+  descripcion String?
+  activo      Boolean   @default(true)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  cargos      Cargo[]
+  permisos    Permiso[]
+
+  @@map("roles")
+}
+
+model Usuario {
+  id                   Int       @id @default(autoincrement())
+  username             String    @unique
+  email                String    @unique
+  nombre               String
+  apellido             String
+  password             String?
+  activo               Boolean   @default(true)
+  ultimoAcceso         DateTime?
+  sedeId               Int
+  areaId               Int
+  cargoId              Int
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
+  autenticacion        String    @default("local")
+  empleadoSapId        Int?      @unique
+  jefeDirectoSapId     Int?
+  nombreCompletoSap    String?
+  ultimaSincronizacion DateTime?
+  area                 Area      @relation(fields: [areaId], references: [id])
+  cargo                Cargo     @relation(fields: [cargoId], references: [id])
+  sede                 Sede      @relation(fields: [sedeId], references: [id])
+
+  @@index([areaId], map: "usuarios_areaId_fkey")
+  @@index([cargoId], map: "usuarios_cargoId_fkey")
+  @@index([sedeId], map: "usuarios_sedeId_fkey")
+  @@map("usuarios")
+}
+
+model Modulo {
+  id          Int       @id @default(autoincrement())
+  nombre      String    @unique
+  descripcion String?
+  ruta        String    @unique
+  activo      Boolean   @default(true)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  
+  // 🆕 CAMPOS PARA JERARQUÍA
+  padreId     Int?      // Referencia al módulo padre
+  nivel       Int       @default(1) // 1=padre, 2=hijo, etc.
+  esMenu      Boolean   @default(true) // Si aparece clickeable en sidebar
+  icono       String?   // Icono para el sidebar (ej: "users", "briefcase")
+  orden       Int       @default(0) // Orden de aparición en sidebar
+  
+  // 🔗 RELACIONES JERÁRQUICAS
+  padre       Modulo?   @relation("ModuloHierarchy", fields: [padreId], references: [id])
+  submodulos  Modulo[]  @relation("ModuloHierarchy")
+  
+  // Relación existente con permisos
+  permisos    Permiso[]
+
+  @@index([padreId])
+  @@index([nivel])
+  @@index([orden])
+  @@map("modulos")
+}
+
+model Permiso {
+  id         Int      @id @default(autoincrement())
+  rolId      Int
+  moduloId   Int
+  crear      Boolean  @default(false)
+  leer       Boolean  @default(false)
+  actualizar Boolean  @default(false)
+  eliminar   Boolean  @default(false)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  modulo     Modulo   @relation(fields: [moduloId], references: [id])
+  rol        Rol      @relation(fields: [rolId], references: [id])
+
+  @@unique([rolId, moduloId])
+  @@index([moduloId], map: "permisos_moduloId_fkey")
+  @@map("permisos")
+}
