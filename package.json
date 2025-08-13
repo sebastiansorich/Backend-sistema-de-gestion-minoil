@@ -20,6 +20,7 @@
     "prisma:migrate": "prisma migrate dev",
     "prisma:migrate:deploy": "prisma migrate deploy",
     "prisma:seed": "ts-node prisma/seed.ts",
+    "prisma:seed:mantenimientos": "ts-node prisma/seed-mantenimientos.ts",
     "prisma:studio": "prisma studio",
     "db:reset": "prisma migrate reset --force"
   },

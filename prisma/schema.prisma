@@ -8,19 +8,18 @@ datasource db {
 }
 
 model Sede {
-  id         Int       @id @default(autoincrement())
-  nombre     String    @unique
-  direccion  String?
-  telefono   String?
-  email      String?
-  activo     Boolean   @default(true)
-  createdAt  DateTime  @default(now())
-  updatedAt  DateTime  @updatedAt
-  // 🆕 Campos para sincronización SAP
-  sedeSapId  String?   @unique
-  nombreSap  String?
-  areas      Area[]
-  usuarios   Usuario[]
+  id        Int       @id @default(autoincrement())
+  nombre    String    @unique
+  direccion String?
+  telefono  String?
+  email     String?
+  activo    Boolean   @default(true)
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  nombreSap String?
+  sedeSapId String?   @unique
+  areas     Area[]
+  usuarios  Usuario[]
 
   @@map("sedes")
 }
@@ -85,27 +84,28 @@ model Rol {
 }
 
 model Usuario {
-  id                   Int       @id @default(autoincrement())
-  username             String    @unique
-  email                String    @unique
+  id                   Int                    @id @default(autoincrement())
+  username             String                 @unique
+  email                String                 @unique
   nombre               String
   apellido             String
   password             String?
-  activo               Boolean   @default(true)
+  activo               Boolean                @default(true)
   ultimoAcceso         DateTime?
   sedeId               Int
   areaId               Int
   cargoId              Int
-  createdAt            DateTime  @default(now())
-  updatedAt            DateTime  @updatedAt
-  autenticacion        String    @default("local")
-  empleadoSapId        Int?      @unique
+  createdAt            DateTime               @default(now())
+  updatedAt            DateTime               @updatedAt
+  autenticacion        String                 @default("local")
+  empleadoSapId        Int?                   @unique
   jefeDirectoSapId     Int?
   nombreCompletoSap    String?
   ultimaSincronizacion DateTime?
-  area                 Area      @relation(fields: [areaId], references: [id])
-  cargo                Cargo     @relation(fields: [cargoId], references: [id])
-  sede                 Sede      @relation(fields: [sedeId], references: [id])
+  mantenimientos       MantenimientoChopera[]
+  area                 Area                   @relation(fields: [areaId], references: [id])
+  cargo                Cargo                  @relation(fields: [cargoId], references: [id])
+  sede                 Sede                   @relation(fields: [sedeId], references: [id])
 
   @@index([areaId], map: "usuarios_areaId_fkey")
   @@index([cargoId], map: "usuarios_cargoId_fkey")
@@ -121,19 +121,13 @@ model Modulo {
   activo      Boolean   @default(true)
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
-  
-  // 🆕 CAMPOS PARA JERARQUÍA
-  padreId     Int?      // Referencia al módulo padre
-  nivel       Int       @default(1) // 1=padre, 2=hijo, etc.
-  esMenu      Boolean   @default(true) // Si aparece clickeable en sidebar
-  icono       String?   // Icono para el sidebar (ej: "users", "briefcase")
-  orden       Int       @default(0) // Orden de aparición en sidebar
-  
-  // 🔗 RELACIONES JERÁRQUICAS
+  esMenu      Boolean   @default(true)
+  icono       String?
+  nivel       Int       @default(1)
+  orden       Int       @default(0)
+  padreId     Int?
   padre       Modulo?   @relation("ModuloHierarchy", fields: [padreId], references: [id])
   submodulos  Modulo[]  @relation("ModuloHierarchy")
-  
-  // Relación existente con permisos
   permisos    Permiso[]
 
   @@index([padreId])
@@ -158,4 +152,98 @@ model Permiso {
   @@unique([rolId, moduloId])
   @@index([moduloId], map: "permisos_moduloId_fkey")
   @@map("permisos")
+}
+
+model TipoMantenimiento {
+  id             Int                    @id @default(autoincrement())
+  nombre         String                 @unique
+  descripcion    String?
+  activo         Boolean                @default(true)
+  createdAt      DateTime               @default(now())
+  updatedAt      DateTime               @updatedAt
+  mantenimientos MantenimientoChopera[]
+
+  @@map("tipos_mantenimiento")
+}
+
+model CategoriaChecklist {
+  id        Int             @id @default(autoincrement())
+  nombre    String
+  orden     Int
+  createdAt DateTime        @default(now())
+  updatedAt DateTime        @updatedAt
+  items     ItemChecklist[]
+
+  @@map("categorias_checklist")
+}
+
+model ItemChecklist {
+  id            Int                  @id @default(autoincrement())
+  categoriaId   Int
+  nombre        String
+  tipoRespuesta String               @default("boolean")
+  opciones      Json?
+  orden         Int
+  createdAt     DateTime             @default(now())
+  updatedAt     DateTime             @updatedAt
+  categoria     CategoriaChecklist   @relation(fields: [categoriaId], references: [id])
+  respuestas    RespuestaChecklist[]
+
+  @@index([categoriaId], map: "items_checklist_categoriaId_fkey")
+  @@map("items_checklist")
+}
+
+model MantenimientoChopera {
+  id                       Int                  @id @default(autoincrement())
+  usuarioId                Int
+  clienteCodigo            String
+  choperaId                Int
+  fechaVisita              DateTime
+  tipoMantenimientoId      Int
+  estadoGeneral            String?              @db.Text
+  comentarioEstado         String?              @db.Text
+  comentarioCalidadCerveza String?              @db.Text
+  createdAt                DateTime             @default(now())
+  updatedAt                DateTime             @updatedAt
+  tipoMantenimiento        TipoMantenimiento    @relation(fields: [tipoMantenimientoId], references: [id])
+  usuario                  Usuario              @relation(fields: [usuarioId], references: [id])
+  respuestasChecklist      RespuestaChecklist[]
+  respuestasSensorial      RespuestaSensorial[]
+
+  @@index([fechaVisita])
+  @@index([clienteCodigo])
+  @@index([choperaId])
+  @@index([tipoMantenimientoId], map: "mantenimientos_choperas_tipoMantenimientoId_fkey")
+  @@index([usuarioId], map: "mantenimientos_choperas_usuarioId_fkey")
+  @@map("mantenimientos_choperas")
+}
+
+model RespuestaChecklist {
+  id              Int                  @id @default(autoincrement())
+  mantenimientoId Int
+  itemId          Int
+  valor           String               @db.Text
+  createdAt       DateTime             @default(now())
+  updatedAt       DateTime             @updatedAt
+  item            ItemChecklist        @relation(fields: [itemId], references: [id])
+  mantenimiento   MantenimientoChopera @relation(fields: [mantenimientoId], references: [id])
+
+  @@index([itemId], map: "respuestas_checklist_itemId_fkey")
+  @@index([mantenimientoId], map: "respuestas_checklist_mantenimientoId_fkey")
+  @@map("respuestas_checklist")
+}
+
+model RespuestaSensorial {
+  id              Int                  @id @default(autoincrement())
+  mantenimientoId Int
+  grifo           Int
+  cerveza         String
+  criterio        String
+  valor           String               @default("Cumple")
+  createdAt       DateTime             @default(now())
+  updatedAt       DateTime             @updatedAt
+  mantenimiento   MantenimientoChopera @relation(fields: [mantenimientoId], references: [id])
+
+  @@index([mantenimientoId], map: "respuestas_sensorial_mantenimientoId_fkey")
+  @@map("respuestas_sensorial")
 }

@@ -12,6 +12,7 @@ import { AuthModule } from '@/modules/auth/auth.module';
 import { ModulosModule } from '@/modules/modulos/modulos.module';
 import { PermisosModule } from '@/modules/permisos/permisos.module';
 import { SapModule } from '@/modules/sap/sap.module';
+import { MantenimientosModule } from '@/modules/bendita/mantenimientos.module';
 
 @Module({
   imports: [
@@ -28,6 +29,7 @@ import { SapModule } from '@/modules/sap/sap.module';
     ModulosModule,
     PermisosModule,
     SapModule,
+    MantenimientosModule,
   ],
   providers: [PrismaService],
 })
