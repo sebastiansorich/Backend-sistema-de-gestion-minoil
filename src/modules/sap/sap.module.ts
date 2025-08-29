@@ -3,7 +3,7 @@ import { ConfigModule } from '@nestjs/config';
 import { SapHanaService } from './sap-hana.service';
 import { SapSyncService } from './sap-sync.service';
 import { SapController } from './sap.controller';
-import { PrismaService } from '@/config/prisma.service';
+import { LdapService } from '../auth/ldap.service';
 
 @Module({
   imports: [ConfigModule],
@@ -11,7 +11,7 @@ import { PrismaService } from '@/config/prisma.service';
   providers: [
     SapHanaService,
     SapSyncService,
-    PrismaService
+    LdapService
   ],
   exports: [SapHanaService, SapSyncService]
 })

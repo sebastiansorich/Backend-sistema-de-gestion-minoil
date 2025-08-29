@@ -265,7 +265,7 @@ export class NombreMatchingUtil {
   static buscarEmpleadoSAPPorUsuarioLDAP(
     nombreLDAP: string,
     apellidoLDAP: string,
-    empleadosSAP: { empleadoSapId: number; nombreCompletoSap: string }[],
+    empleadosSAP: { empID: number; nombreCompletoSap: string }[],
     umbralMinimo: number = 75
   ): {
     empleado: any | null;

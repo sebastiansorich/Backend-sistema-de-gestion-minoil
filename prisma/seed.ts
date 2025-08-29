@@ -6,11 +6,7 @@ async function main() {
   console.log('🌱 Iniciando seed seguro (solo datos faltantes)...\n');
 
   try {
-    // 🏢 1. VERIFICAR SEDES EXISTENTES (NO TOCAR)
-    const sedesExistentes = await prisma.sede.count();
-    console.log(`🏢 Sedes existentes: ${sedesExistentes} (no se modificarán)`);
-
-    // 📦 2. CREAR MÓDULOS JERÁRQUICOS (NO EXISTEN - SEGURO CREAR)
+    // 📦 1. CREAR MÓDULOS JERÁRQUICOS (NO EXISTEN - SEGURO CREAR)
     console.log('\n📦 Creando módulos jerárquicos del sistema...');
     
     // 1️⃣ CREAR MÓDULOS PADRE PRIMERO
@@ -346,7 +342,6 @@ async function main() {
 
     // 📊 VERIFICACIÓN FINAL
     const resumenFinal = {
-      sedes: await prisma.sede.count(),
       modulos: await prisma.modulo.count(),
       roles: await prisma.rol.count(),
       permisos: await prisma.permiso.count(),
@@ -355,7 +350,6 @@ async function main() {
 
     console.log('\n🎉 ¡Seed completado sin duplicados!');
     console.log('📊 Estado final:');
-    console.log(`   • ${resumenFinal.sedes} sedes (sin tocar)`)
     console.log(`   • ${resumenFinal.modulos} módulos (✅ creados)`);
     console.log(`   • ${resumenFinal.roles} roles (✅ completados)`);
     console.log(`   • ${resumenFinal.permisos} permisos (✅ configurados)`);

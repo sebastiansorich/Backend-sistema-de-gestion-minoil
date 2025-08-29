@@ -1,350 +1,401 @@
-import { Injectable, UnauthorizedException, Logger, BadRequestException } from '@nestjs/common';
-import { PrismaService } from '../../config/prisma.service';
-import * as bcrypt from 'bcrypt';
+import { Injectable, UnauthorizedException, Logger } from '@nestjs/common';
+import { JwtService } from '@nestjs/jwt';
+import { LdapService, LDAPUserInfo } from './ldap.service';
+import { SapHanaService, UsuarioHANA } from '../sap/sap-hana.service';
 import { UsuarioConPermisosDto } from '../usuarios/dto/usuario-con-permisos.dto';
-import { LdapService } from './ldap.service';
-import { SapHanaService } from '../sap/sap-hana.service';
-import { NombreMatchingUtil } from '../../utils/nombre-matching.util';
-import { PasswordPolicyService } from './password-policy.service';
+import * as bcrypt from 'bcryptjs';
+
+export interface AuthResult {
+  access_token: string;
+  user: UsuarioConPermisosDto;
+  authMethod: 'LDAP' | 'LOCAL';
+}
 
 @Injectable()
 export class AuthService {
   private readonly logger = new Logger(AuthService.name);
-  
+
   constructor(
-    private prisma: PrismaService,
-    private ldapService: LdapService,
-    private sapHanaService: SapHanaService,
-    private passwordPolicyService: PasswordPolicyService
+    private readonly jwtService: JwtService,
+    private readonly ldapService: LdapService,
+    private readonly sapHanaService: SapHanaService,
   ) {}
 
-  async login(username: string, password: string): Promise<UsuarioConPermisosDto> {
+  /**
+   * Autenticación híbrida: LDAP primero, luego local
+   */
+  async login(username: string, password: string): Promise<AuthResult> {
+    this.logger.log(`🔐 Intentando autenticación para usuario: ${username}`);
+
     try {
-      // 1. Intentar autenticación LDAP primero
-      this.logger.log(`Intentando autenticación LDAP para usuario: ${username}`);
-      
-      const ldapUserInfo = await this.ldapService.authenticateAndGetUserInfo(username, password);
-      
-      // 2. LDAP exitoso: sincronizar usuario automáticamente
-      const usuario = await this.syncUserFromLDAP(ldapUserInfo);
-      
-      // 3. Cargar permisos y retornar
-      return await this.cargarPermisos(usuario);
-      
-    } catch (ldapError) {
-      this.logger.warn(`Autenticación LDAP falló para ${username}, intentando autenticación local:`, ldapError.message);
-      
-      // 4. LDAP falló: intentar autenticación local
-      return await this.loginLocal(username, password);
+      // PASO 1: Intentar autenticación LDAP
+      const ldapResult = await this.authenticateWithLDAP(username, password);
+      if (ldapResult) {
+        this.logger.log(`✅ Autenticación LDAP exitosa para: ${username}`);
+        return ldapResult;
+      }
+    } catch (error) {
+      this.logger.warn(`⚠️ Autenticación LDAP falló para ${username}: ${error.message}`);
+    }
+
+    // PASO 2: Intentar autenticación local
+    try {
+      const localResult = await this.authenticateWithLocal(username, password);
+      this.logger.log(`✅ Autenticación local exitosa para: ${username}`);
+      return localResult;
+    } catch (error) {
+      this.logger.error(`❌ Autenticación local falló para ${username}: ${error.message}`);
+      throw new UnauthorizedException('Credenciales inválidas');
     }
   }
 
   /**
-   * Autenticación local como fallback
+   * Autenticación con LDAP
    */
-  private async loginLocal(username: string, password: string): Promise<UsuarioConPermisosDto> {
-    const usuario = await this.prisma.usuario.findUnique({ where: { username } });
+  private async authenticateWithLDAP(username: string, password: string): Promise<AuthResult | null> {
+    try {
+      // Autenticar con LDAP
+      const ldapUserInfo = await this.ldapService.authenticateAndGetUserInfo(username, password);
+      
+      // Buscar usuario en SAP HANA por username LDAP
+      let usuario = await this.sapHanaService.obtenerUsuarioPorUsername(ldapUserInfo.username);
+
+      // Si no existe, buscar por empID o crear nuevo
+      if (!usuario) {
+        usuario = await this.findOrCreateUserFromLDAP(ldapUserInfo);
+      }
+
+      // Actualizar último acceso
+      await this.updateLastAccess(usuario.id);
+
+      // Cargar permisos y generar token
+      const usuarioConPermisos = await this.loadUserPermissions(usuario);
+      const token = this.generateJWT(usuario, usuarioConPermisos.rol);
+
+      return {
+        access_token: token,
+        user: usuarioConPermisos,
+        authMethod: 'LDAP',
+      };
+
+    } catch (error) {
+      this.logger.debug(`LDAP authentication failed for ${username}: ${error.message}`);
+      return null;
+    }
+  }
+
+  /**
+   * Autenticación local
+   */
+  private async authenticateWithLocal(username: string, password: string): Promise<AuthResult> {
+    // Buscar usuario en SAP HANA
+    const usuario = await this.sapHanaService.obtenerUsuarioPorUsername(username);
     
     if (!usuario) {
       throw new UnauthorizedException('Usuario no encontrado');
     }
 
-    if (usuario.autenticacion !== 'local') {
-      throw new UnauthorizedException('Usuario configurado para LDAP solamente');
+    // Verificar que el usuario permita autenticación local
+    if (usuario.autenticacion === 'LDAP_ONLY') {
+      throw new UnauthorizedException('Usuario configurado solo para autenticación LDAP');
     }
 
+    // Verificar contraseña
     if (!usuario.password) {
-      throw new UnauthorizedException('Usuario sin password local');
+      throw new UnauthorizedException('Usuario sin contraseña configurada');
     }
 
-    const passwordValido = await bcrypt.compare(password, usuario.password);
-    if (!passwordValido) {
-      throw new UnauthorizedException('Password incorrecto');
-    }
-
-    this.logger.log(`Autenticación local exitosa para usuario: ${username}`);
-    return this.cargarPermisos(usuario);
-  }
-
-  /**
-   * Sincroniza usuario desde LDAP - SOLO busca usuarios SAP existentes, NO crea nuevos
-   */
-  private async syncUserFromLDAP(ldapUserInfo: any): Promise<any> {
-    const { username, email, nombre, apellido } = ldapUserInfo;
-  
-    this.logger.log(`🔍 LDAP Login: ${username} (${nombre} ${apellido}) - SOLO BUSCAR USUARIOS SAP EXISTENTES`);
-  
-    // PASO 1: Buscar usuario existente por username
-    let usuarioSAP = await this.prisma.usuario.findUnique({ 
-      where: { username },
-      include: {
-        cargo: { include: { rol: true } },
-        area: true,
-        sede: true
-      }
-    });
-  
-    if (usuarioSAP) {
-      this.logger.log(`✅ Usuario encontrado por username: ${username} (SAP ID: ${usuarioSAP.empleadoSapId})`);
-      
-      // Actualizar último acceso y continuar
-      return await this.prisma.usuario.update({
-        where: { id: usuarioSAP.id },
-        data: {
-          ultimoAcceso: new Date(),
-          email: email || usuarioSAP.email, // Actualizar email si viene de LDAP
-          autenticacion: 'ldap'
-        }
-      });
-    }
-  
-    // PASO 2: No existe por username - buscar en usuarios SAP por matching de nombres
-    this.logger.log(`👤 Usuario ${username} no encontrado por username, buscando matches en usuarios SAP...`);
-  
-    // Obtener TODOS los usuarios SAP (que tienen empleadoSapId)
-    const usuariosSAP = await this.prisma.usuario.findMany({
-      where: {
-        empleadoSapId: { not: null }, // Solo usuarios sincronizados desde SAP
-        activo: true
-      },
-      select: {
-        id: true,
-        username: true,
-        empleadoSapId: true,
-        nombreCompletoSap: true,
-        nombre: true,
-        apellido: true
-      }
-    });
-  
-    this.logger.log(`📊 Buscando matches entre "${nombre} ${apellido}" y ${usuariosSAP.length} usuarios SAP...`);
-  
-    // PASO 3: Hacer matching inteligente
-    const candidatosSAP = usuariosSAP.map(u => ({
-      empleadoSapId: u.empleadoSapId!,
-      nombreCompletoSap: u.nombreCompletoSap || `${u.nombre} ${u.apellido}`,
-      usuarioCompleto: u
-    }));
-  
-    const matchResult = NombreMatchingUtil.buscarEmpleadoSAPPorUsuarioLDAP(
-      nombre,
-      apellido,
-      candidatosSAP,
-      70 // Umbral más bajo para ser más inclusivo
-    );
-  
-    if (matchResult.empleado) {
-      this.logger.log(`🎯 MATCH ENCONTRADO:`, {
-        usuarioLDAP: `${nombre} ${apellido}`,
-        usuarioSAP: matchResult.empleado.nombreCompletoSap,
-        similitud: `${matchResult.similitud}%`,
-        esConfiable: matchResult.esConfiable,
-        estrategia: matchResult.estrategia
-      });
-  
-      // PASO 4: Actualizar usuario SAP existente con username LDAP
-      const usuarioSAPEncontrado = matchResult.empleado.usuarioCompleto;
-      
-      this.logger.log(`🔄 Actualizando usuario SAP "${usuarioSAPEncontrado.username}" → "${username}"`);
-  
-      return await this.prisma.usuario.update({
-        where: { id: usuarioSAPEncontrado.id },
-        data: {
-          username, // ¡ESTO ES CLAVE! Actualizar con username de LDAP
-          email: email || `${username}@minoil.com.bo`,
-          autenticacion: 'ldap',
-          ultimoAcceso: new Date(),
-          ultimaSincronizacion: new Date()
-          // CONSERVAR todos los demás datos SAP (area, cargo, empleadoSapId, etc)
-        }
-      });
-  
-    } else {
-      // PASO 5: NO SE ENCONTRÓ MATCH - DAR ERROR (NO CREAR USUARIO)
-      this.logger.error(`❌ NO SE ENCONTRÓ USUARIO SAP para "${nombre} ${apellido}" (username: ${username})`);
-      this.logger.error(`📋 Usuarios SAP disponibles: ${usuariosSAP.map(u => u.nombreCompletoSap || `${u.nombre} ${u.apellido}`).join(', ')}`);
-      
-      throw new UnauthorizedException(
-        `Usuario "${nombre} ${apellido}" no encontrado en el sistema. ` +
-        `Debe ser sincronizado desde SAP primero o contactar al administrador.`
-      );
-    }
-  }
-
-  // Implementa este método para devolver el DTO con permisos (Nueva arquitectura: Usuario → Cargo → Rol)
-  async cargarPermisos(usuario: any): Promise<UsuarioConPermisosDto> {
-    // Cargar usuario con todas las relaciones necesarias usando nueva arquitectura
-    const usuarioCompleto = await this.prisma.usuario.findUnique({
-      where: { id: usuario.id },
-      include: {
-        sede: { select: { id: true, nombre: true } },
-        area: { select: { id: true, nombre: true } },
-        cargo: { 
-          select: { 
-            id: true, 
-            nombre: true,
-            rol: {
-              select: {
-                id: true,
-                nombre: true,
-                permisos: {
-                  include: {
-                    modulo: { select: { id: true, nombre: true } }
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-    });
-
-    if (!usuarioCompleto) {
-      throw new UnauthorizedException('Usuario no encontrado');
+    const isPasswordValid = await bcrypt.compare(password, usuario.password);
+    if (!isPasswordValid) {
+      throw new UnauthorizedException('Contraseña incorrecta');
     }
 
     // Actualizar último acceso
-    await this.prisma.usuario.update({
-      where: { id: usuario.id },
-      data: { ultimoAcceso: new Date() }
-    });
+    await this.updateLastAccess(usuario.id);
 
-    // Mapear permisos desde cargo.rol (Nueva arquitectura)
-    const permisos = usuarioCompleto.cargo.rol.permisos.map(permiso => ({
-      moduloId: permiso.modulo.id,
-      moduloNombre: permiso.modulo.nombre,
-      crear: permiso.crear,
-      leer: permiso.leer,
-      actualizar: permiso.actualizar,
-      eliminar: permiso.eliminar
-    }));
+    // Cargar permisos y generar token
+    const usuarioConPermisos = await this.loadUserPermissions(usuario);
+    const token = this.generateJWT(usuario, usuarioConPermisos.rol);
 
-    this.logger.log(`Permisos cargados para ${usuarioCompleto.username}:`, {
-      cargo: usuarioCompleto.cargo.nombre,
-      rol: usuarioCompleto.cargo.rol.nombre,
-      cantidadPermisos: permisos.length
-    });
-
-    // Construir el DTO de respuesta
     return {
-      id: usuarioCompleto.id,
-      username: usuarioCompleto.username,
-      email: usuarioCompleto.email,
-      nombre: usuarioCompleto.nombre,
-      apellido: usuarioCompleto.apellido,
-      autenticacion: usuarioCompleto.autenticacion,
-      activo: usuarioCompleto.activo,
-      ultimoAcceso: usuarioCompleto.ultimoAcceso,
-      sede: usuarioCompleto.sede,
-      area: usuarioCompleto.area,
-      cargo: usuarioCompleto.cargo,
-      rol: {
-        id: usuarioCompleto.cargo.rol.id,
-        nombre: usuarioCompleto.cargo.rol.nombre
-      },
-      permisos
+      access_token: token,
+      user: usuarioConPermisos,
+      authMethod: 'LOCAL',
     };
   }
 
   /**
-   * Cambia la contraseña de un usuario LDAP con validaciones y auditoría
+   * Busca o crea usuario desde información LDAP
    */
-  async changePassword(
-    username: string, 
-    currentPassword: string, 
-    newPassword: string, 
-    confirmPassword: string,
-    clientIp?: string,
-    userAgent?: string
-  ): Promise<{ success: boolean; message: string }> {
+  private async findOrCreateUserFromLDAP(ldapUserInfo: LDAPUserInfo): Promise<UsuarioHANA> {
+    // Buscar por empID en SAP
+    const empleadosSAP = await this.sapHanaService.obtenerEmpleadosActivos();
+    const empleadoSAP = this.findEmployeeByLDAPInfo(ldapUserInfo, empleadosSAP);
+
+    if (empleadoSAP) {
+      // Buscar usuario existente por empID
+      const usuarios = await this.sapHanaService.obtenerUsuarios();
+      let usuario = usuarios.find(u => u.empID === empleadoSAP.empID);
+
+      if (usuario) {
+        // Actualizar información LDAP
+        await this.sapHanaService.actualizarUsuario(usuario.id, {
+          username: ldapUserInfo.username,
+          email: ldapUserInfo.email,
+          autenticacion: 'LDAP',
+        });
+        return await this.sapHanaService.obtenerUsuarioPorId(usuario.id);
+      }
+    }
+
+    // Crear nuevo usuario
+    return await this.createNewUserFromLDAP(ldapUserInfo, empleadoSAP);
+  }
+
+  /**
+   * Busca empleado SAP por información LDAP
+   */
+  private findEmployeeByLDAPInfo(ldapUserInfo: LDAPUserInfo, empleadosSAP: any[]): any | null {
+    const nombreCompletoLDAP = `${ldapUserInfo.nombre} ${ldapUserInfo.apellido}`.toLowerCase();
+    
+    // Buscar por nombre exacto
+    const matchExacto = empleadosSAP.find(emp => 
+      emp.nombreCompletoSap.toLowerCase() === nombreCompletoLDAP
+    );
+    
+    if (matchExacto) return matchExacto;
+
+    // Buscar por similitud
+    let mejorMatch: any = null;
+    let mejorSimilitud = 0;
+
+    for (const empleado of empleadosSAP) {
+      const similitud = this.calculateSimilarity(
+        nombreCompletoLDAP, 
+        empleado.nombreCompletoSap.toLowerCase()
+      );
+      
+      if (similitud > mejorSimilitud && similitud >= 85) {
+        mejorMatch = empleado;
+        mejorSimilitud = similitud;
+      }
+    }
+
+    return mejorMatch;
+  }
+
+  /**
+   * Crea nuevo usuario desde información LDAP
+   */
+  private async createNewUserFromLDAP(ldapUserInfo: LDAPUserInfo, empleadoSAP: any): Promise<UsuarioHANA> {
+    // Obtener rol por defecto (ID = 3)
+    const rolPorDefecto = await this.sapHanaService.obtenerRolPorId(3);
+
+    if (!rolPorDefecto) {
+      throw new Error('No se encontró el rol por defecto con ID = 3');
+    }
+
+    const datosUsuario: any = {
+      username: ldapUserInfo.username,
+      email: ldapUserInfo.email,
+      nombre: ldapUserInfo.nombre,
+      apellido: ldapUserInfo.apellido,
+      autenticacion: 'LDAP',
+      activo: true,
+      ROLID: rolPorDefecto.id, // Usar ROLID para mantener consistencia
+    };
+
+    // Si hay empleado SAP, agregar información adicional
+    if (empleadoSAP) {
+      datosUsuario.empID = empleadoSAP.empID;
+      datosUsuario.nombreCompletoSap = empleadoSAP.nombreCompletoSap;
+    }
+
+    const nuevoUsuario = await this.sapHanaService.crearUsuario(datosUsuario);
+    this.logger.log(`👤 Nuevo usuario creado desde LDAP: ${ldapUserInfo.username}`);
+    return nuevoUsuario;
+  }
+
+  /**
+   * Actualiza último acceso del usuario
+   */
+  private async updateLastAccess(userId: number): Promise<void> {
+    await this.sapHanaService.actualizarUsuario(userId, {
+      ultimoAcceso: new Date(),
+    });
+  }
+
+  /**
+   * Carga permisos del usuario
+   */
+  private async loadUserPermissions(usuario: UsuarioHANA): Promise<UsuarioConPermisosDto> {
+    // Obtener permisos del rol
+    const permisos = await this.sapHanaService.obtenerPermisosPorRol(usuario.ROLID);
+
+    // Obtener módulos para los permisos
+    const modulos = await this.sapHanaService.obtenerModulos();
+    const modulosMap = new Map(modulos.map(modulo => [modulo.id, modulo]));
+
+    // Construir permisos con información del módulo
+    const permisosConModulos = permisos.map(permiso => {
+      const modulo = modulosMap.get(permiso.moduloId);
+      return {
+        moduloId: permiso.moduloId,
+        moduloNombre: modulo ? modulo.nombre : 'Módulo no encontrado',
+        crear: permiso.crear,
+        leer: permiso.leer,
+        actualizar: permiso.actualizar,
+        eliminar: permiso.eliminar,
+      };
+    }).filter(permiso => permiso.moduloNombre !== 'Módulo no encontrado');
+
+    // Obtener rol
+    const rol = await this.sapHanaService.obtenerRolPorId(usuario.ROLID);
+
+    return {
+      id: usuario.id,
+      username: usuario.username,
+      email: usuario.email,
+      nombre: usuario.nombre,
+      apellido: usuario.apellido,
+      autenticacion: usuario.autenticacion,
+      activo: usuario.activo,
+      ultimoAcceso: usuario.ultimoAcceso,
+      empID: usuario.empID,
+      jefeDirectoSapId: usuario.jefeDirectoSapId,
+      nombreCompletoSap: usuario.nombreCompletoSap,
+      rol: {
+        id: rol.id,
+        nombre: rol.nombre,
+        descripcion: rol.descripcion,
+      },
+      permisos: permisosConModulos,
+    };
+  }
+
+  /**
+   * Genera token JWT
+   */
+  private generateJWT(usuario: UsuarioHANA, rol: any): string {
+      const payload = {
+      sub: usuario.id,
+      username: usuario.username,
+      email: usuario.email,
+      rol: rol.nombre,
+    };
+
+    return this.jwtService.sign(payload);
+  }
+
+  /**
+   * Calcula similitud entre dos strings
+   */
+  private calculateSimilarity(str1: string, str2: string): number {
+    const longer = str1.length > str2.length ? str1 : str2;
+    const shorter = str1.length > str2.length ? str2 : str1;
+    
+    if (longer.length === 0) return 100;
+    
+    const distance = this.calculateLevenshteinDistance(longer, shorter);
+    return Math.round(((longer.length - distance) / longer.length) * 100);
+  }
+
+  /**
+   * Calcula distancia de Levenshtein
+   */
+  private calculateLevenshteinDistance(str1: string, str2: string): number {
+    const matrix = Array(str2.length + 1).fill(null).map(() => Array(str1.length + 1).fill(null));
+
+    for (let i = 0; i <= str1.length; i++) {
+      matrix[0][i] = i;
+    }
+
+    for (let j = 0; j <= str2.length; j++) {
+      matrix[j][0] = j;
+    }
+
+    for (let j = 1; j <= str2.length; j++) {
+      for (let i = 1; i <= str1.length; i++) {
+        const cost = str1[i - 1] === str2[j - 1] ? 0 : 1;
+        matrix[j][i] = Math.min(
+          matrix[j][i - 1] + 1,
+          matrix[j - 1][i] + 1,
+          matrix[j - 1][i - 1] + cost
+        );
+      }
+    }
+
+    return matrix[str2.length][str1.length];
+  }
+
+  /**
+   * Cambia la contraseña de un usuario
+   */
+  async changePassword(username: string, currentPassword: string, newPassword: string, confirmPassword: string) {
     try {
-      // 1. Validar que las contraseñas coincidan
+      // Validar que las contraseñas coincidan
       if (newPassword !== confirmPassword) {
-        throw new Error('Las contraseñas no coinciden');
+        throw new UnauthorizedException('Las contraseñas no coinciden');
       }
 
-      // 2. Validar que no sea la misma contraseña
-      if (currentPassword === newPassword) {
-        throw new Error('La nueva contraseña debe ser diferente a la actual');
-      }
-
-      // 3. Buscar usuario en la base de datos para verificar que existe
-      const usuario = await this.prisma.usuario.findUnique({ 
-        where: { username },
-        select: { id: true, username: true, autenticacion: true, nombre: true, apellido: true, email: true }
-      });
+      // Obtener usuario
+      const usuario = await this.sapHanaService.obtenerUsuarioPorUsername(username);
 
       if (!usuario) {
         throw new UnauthorizedException('Usuario no encontrado');
       }
 
-      // 4. Verificar que el usuario usa autenticación LDAP
-      if (usuario.autenticacion === 'local') {
-        throw new Error('Este usuario usa autenticación local. Use el proceso de cambio de contraseña local.');
+      // Verificar que el usuario permita cambio de contraseña local
+      if (usuario.autenticacion === 'LDAP_ONLY') {
+        throw new UnauthorizedException('Usuario configurado solo para autenticación LDAP');
       }
 
-      // 5. Validar la nueva contraseña contra la política de seguridad
-      const userInfo = {
-        username: usuario.username,
-        nombre: usuario.nombre,
-        apellido: usuario.apellido,
-        email: usuario.email
-      };
-
-      const passwordValidation = this.passwordPolicyService.validatePassword(
-        newPassword, 
-        userInfo, 
-        this.passwordPolicyService.getMinoilPasswordPolicy()
-      );
-
-      if (!passwordValidation.isValid) {
-        const errorMessage = `Contraseña no cumple con la política de seguridad:\n${passwordValidation.errors.join('\n')}`;
-        this.logger.warn(`Contraseña rechazada para usuario ${username}:`, passwordValidation.errors);
-        throw new BadRequestException(errorMessage);
+      // Si es usuario LDAP, cambiar contraseña en LDAP
+      if (usuario.autenticacion === 'LDAP') {
+        await this.ldapService.changePassword(username, currentPassword, newPassword);
+        this.logger.log(`🔐 Contraseña LDAP cambiada para usuario: ${username}`);
+      } else {
+        // Verificar contraseña actual local
+        if (!usuario.password) {
+          throw new UnauthorizedException('Usuario sin contraseña configurada');
       }
 
-      // Log del nivel de seguridad de la contraseña
-      this.logger.log(`Contraseña validada para usuario ${username}:`, {
-        strength: passwordValidation.strength,
-        score: passwordValidation.score
+      const isCurrentPasswordValid = await bcrypt.compare(currentPassword, usuario.password);
+      if (!isCurrentPasswordValid) {
+        throw new UnauthorizedException('Contraseña actual incorrecta');
+      }
+
+      // Encriptar nueva contraseña
+      const hashedNewPassword = await bcrypt.hash(newPassword, 10);
+
+        // Actualizar contraseña en SAP HANA
+      await this.sapHanaService.actualizarUsuario(usuario.id, {
+        password: hashedNewPassword,
       });
 
-      // 6. Log de auditoría - inicio del proceso
-      this.logger.log(`Iniciando cambio de contraseña para usuario LDAP: ${username}`, {
-        userId: usuario.id,
-        clientIp,
-        userAgent: userAgent?.substring(0, 200), // Limitar tamaño del log
-        timestamp: new Date().toISOString()
-      });
-
-      // 7. Intentar cambiar la contraseña en LDAP
-      await this.ldapService.changePassword(username, currentPassword, newPassword);
-
-      // 8. Log de auditoría - éxito
-      this.logger.log(`Contraseña cambiada exitosamente para usuario LDAP: ${username}`, {
-        userId: usuario.id,
-        clientIp,
-        timestamp: new Date().toISOString()
-      });
+        this.logger.log(`🔐 Contraseña local cambiada para usuario: ${username}`);
+      }
 
       return {
-        success: true,
-        message: 'Contraseña cambiada exitosamente'
+        message: 'Contraseña cambiada exitosamente',
+        success: true
       };
 
     } catch (error) {
-      // Log de auditoría - error
-      this.logger.error(`Error al cambiar contraseña para usuario: ${username}`, {
-        error: error.message,
-        clientIp,
-        timestamp: new Date().toISOString()
-      });
+      this.logger.error(`Error al cambiar contraseña para usuario ${username}:`, error);
+      throw error;
+    }
+  }
 
-      if (error instanceof UnauthorizedException) {
-        throw error;
-      }
-
-      throw new Error(error.message || 'Error al cambiar la contraseña');
+  /**
+   * Valida token JWT
+   */
+  async validateToken(token: string): Promise<any> {
+    try {
+      const payload = this.jwtService.verify(token);
+      return payload;
+    } catch (error) {
+      throw new UnauthorizedException('Token inválido');
     }
   }
 }

@@ -1,4 +1,4 @@
-import { Controller, Post, Body, Req, UseFilters, ValidationPipe, UsePipes, HttpCode } from '@nestjs/common';
+import { Controller, Post, Body, Req, UseFilters, ValidationPipe, UsePipes, HttpCode, Get } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiBadRequestResponse, ApiUnauthorizedResponse } from '@nestjs/swagger';
 import { AuthService } from './auth.service';
 import { LoginDto } from '../usuarios/dto/login.dto';
@@ -79,9 +79,7 @@ export class AuthController {
       changePasswordDto.username,
       changePasswordDto.currentPassword,
       changePasswordDto.newPassword,
-      changePasswordDto.confirmPassword,
-      finalClientIp,
-      finalUserAgent
+      changePasswordDto.confirmPassword
     );
   }
 
@@ -151,5 +149,55 @@ export class AuthController {
       (request.connection as any)?.socket?.remoteAddress ||
       'unknown'
     );
+  }
+
+  @Get('health')
+  @ApiOperation({ summary: 'Verificar estado del sistema de autenticación' })
+  @ApiResponse({ status: 200, description: 'Estado del sistema' })
+  async health() {
+    const config = {
+      ldap: {
+        url: process.env.LDAP_URL || 'No configurado',
+        baseDN: process.env.LDAP_BASE_DN || 'No configurado',
+        adminDN: process.env.LDAP_ADMIN_DN ? 'Configurado' : 'No configurado',
+        adminPassword: process.env.LDAP_ADMIN_PASSWORD ? 'Configurado' : 'No configurado',
+      },
+      sap: {
+        host: process.env.SAP_HANA_HOST || 'No configurado',
+        port: process.env.SAP_HANA_PORT || 'No configurado',
+        username: process.env.SAP_HANA_USERNAME || 'No configurado',
+        password: process.env.SAP_HANA_PASSWORD ? 'Configurado' : 'No configurado',
+      },
+      database: {
+        url: process.env.DATABASE_URL ? 'Configurado' : 'No configurado',
+      },
+      jwt: {
+        secret: process.env.JWT_SECRET ? 'Configurado' : 'No configurado',
+        expiresIn: process.env.JWT_EXPIRES_IN || '24h',
+      },
+    };
+
+    const missingConfig = [];
+    if (!process.env.LDAP_ADMIN_DN) missingConfig.push('LDAP_ADMIN_DN');
+    if (!process.env.LDAP_ADMIN_PASSWORD) missingConfig.push('LDAP_ADMIN_PASSWORD');
+    if (!process.env.SAP_HANA_PASSWORD) missingConfig.push('SAP_HANA_PASSWORD');
+    if (!process.env.DATABASE_URL) missingConfig.push('DATABASE_URL');
+    if (!process.env.JWT_SECRET) missingConfig.push('JWT_SECRET');
+
+    return {
+      status: 'ok',
+      timestamp: new Date().toISOString(),
+      version: '1.0.0',
+      config,
+      missingConfig,
+      recommendations: missingConfig.length > 0 ? [
+        'Configurar variables de entorno faltantes',
+        'Verificar conectividad con LDAP y SAP HANA',
+        'Asegurar que la base de datos esté accesible'
+      ] : [
+        'Sistema configurado correctamente',
+        'Listo para autenticación híbrida'
+      ]
+    };
   }
 } 

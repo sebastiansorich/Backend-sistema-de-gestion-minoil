@@ -22,9 +22,8 @@ export class UsuariosController {
   @Post()
   @ApiOperation({ summary: 'Crear un nuevo usuario' })
   @ApiResponse({ status: 201, description: 'Usuario creado exitosamente' })
-  @ApiResponse({ status: 409, description: 'Ya existe un usuario con ese username o email' })
-  @ApiResponse({ status: 404, description: 'Sede, área, cargo o rol no encontrado' })
-  @ApiResponse({ status: 400, description: 'El área debe pertenecer a la sede especificada' })
+  @ApiResponse({ status: 409, description: 'Ya existe un usuario con ese username, email o empID' })
+  @ApiResponse({ status: 404, description: 'Rol no encontrado' })
   create(@Body() createUsuarioDto: CreateUsuarioDto) {
     return this.usuariosService.create(createUsuarioDto);
   }
@@ -36,10 +35,7 @@ export class UsuariosController {
     return this.usuariosService.findAll();
   }
 
-  @Get('verificar-duplicados')
-  async verificarDuplicados() {
-    return this.usuariosService.verificarDuplicados();
-  }
+
 
   @Get(':id')
   @ApiOperation({ summary: 'Obtener un usuario por ID' })
@@ -54,9 +50,8 @@ export class UsuariosController {
   @ApiOperation({ summary: 'Actualizar un usuario' })
   @ApiParam({ name: 'id', description: 'ID del usuario' })
   @ApiResponse({ status: 200, description: 'Usuario actualizado exitosamente' })
-  @ApiResponse({ status: 404, description: 'Usuario no encontrado' })
-  @ApiResponse({ status: 409, description: 'Ya existe un usuario con ese username o email' })
-  @ApiResponse({ status: 400, description: 'El área debe pertenecer a la sede especificada' })
+  @ApiResponse({ status: 404, description: 'Usuario o rol no encontrado' })
+  @ApiResponse({ status: 409, description: 'Ya existe un usuario con ese username, email o empID' })
   update(
     @Param('id', ParseIntPipe) id: number,
     @Body() updateUsuarioDto: UpdateUsuarioDto,

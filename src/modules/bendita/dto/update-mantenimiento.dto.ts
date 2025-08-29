@@ -36,15 +36,20 @@ export class UpdateMantenimientoDto {
   @IsOptional()
   fechaVisita?: string;
 
-  @ApiPropertyOptional({ example: 'CLP03480' })
+  @ApiPropertyOptional({ example: 'CLP03480', description: 'CardCode del cliente en SAP' })
   @IsString()
   @IsOptional()
   clienteCodigo?: string;
 
-  @ApiPropertyOptional({ example: 1 })
-  @IsInt()
+  @ApiPropertyOptional({ example: '903050', description: 'ItemCode de la chopera en SAP' })
+  @IsString()
   @IsOptional()
-  choperaId?: number;
+  itemCode?: string;
+
+  @ApiPropertyOptional({ example: 'UPP2092208M', description: 'Serie/Activo de la chopera' })
+  @IsString()
+  @IsOptional()
+  choperaCode?: string;
 
   @ApiPropertyOptional({ example: 1 })
   @IsInt()

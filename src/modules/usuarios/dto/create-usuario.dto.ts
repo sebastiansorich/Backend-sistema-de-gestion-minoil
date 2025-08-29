@@ -33,15 +33,23 @@ export class CreateUsuarioDto {
   @IsBoolean()
   activo?: boolean;
 
-  @ApiProperty({ description: 'ID de la sede' })
+  @ApiPropertyOptional({ description: 'ID del rol (por defecto: 3)', default: 3 })
+  @IsOptional()
   @IsInt()
-  sedeId: number;
+  rolID?: number;
 
-  @ApiProperty({ description: 'ID del área' })
+  @ApiPropertyOptional({ description: 'ID del empleado en SAP' })
+  @IsOptional()
   @IsInt()
-  areaId: number;
+  empID?: number;
 
-  @ApiProperty({ description: 'ID del cargo' })
+  @ApiPropertyOptional({ description: 'ID del jefe directo en SAP' })
+  @IsOptional()
   @IsInt()
-  cargoId: number;
+  jefeDirectoSapId?: number;
+
+  @ApiPropertyOptional({ description: 'Nombre completo en SAP' })
+  @IsOptional()
+  @IsString()
+  nombreCompletoSap?: string;
 } 

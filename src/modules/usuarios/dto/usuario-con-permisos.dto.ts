@@ -25,28 +25,20 @@ export class UsuarioConPermisosDto {
   @ApiProperty({ description: 'Último acceso del usuario' })
   ultimoAcceso?: Date;
 
-  @ApiProperty({ description: 'Información de la sede' })
-  sede: {
-    id: number;
-    nombre: string;
-  };
+  @ApiProperty({ description: 'ID del empleado en SAP' })
+  empID?: number;
 
-  @ApiProperty({ description: 'Información del área' })
-  area: {
-    id: number;
-    nombre: string;
-  };
+  @ApiProperty({ description: 'ID del jefe directo en SAP' })
+  jefeDirectoSapId?: number;
 
-  @ApiProperty({ description: 'Información del cargo' })
-  cargo: {
-    id: number;
-    nombre: string;
-  };
+  @ApiProperty({ description: 'Nombre completo en SAP' })
+  nombreCompletoSap?: string;
 
   @ApiProperty({ description: 'Información del rol' })
   rol: {
     id: number;
     nombre: string;
+    descripcion?: string;
   };
 
   @ApiProperty({ description: 'Permisos del usuario por módulo' })

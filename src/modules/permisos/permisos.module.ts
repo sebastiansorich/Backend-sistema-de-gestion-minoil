@@ -1,11 +1,12 @@
 import { Module } from '@nestjs/common';
 import { PermisosService } from './permisos.service';
 import { PermisosController } from './permisos.controller';
-import { PrismaService } from '@/config/prisma.service';
+import { SapModule } from '../sap/sap.module';
 
 @Module({
+  imports: [SapModule],
   controllers: [PermisosController],
-  providers: [PermisosService, PrismaService],
+  providers: [PermisosService],
   exports: [PermisosService],
 })
 export class PermisosModule {} 

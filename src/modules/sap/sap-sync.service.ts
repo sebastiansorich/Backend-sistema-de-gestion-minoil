@@ -1,739 +1,969 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { PrismaService } from '@/config/prisma.service';
-import { SapHanaService, EmpleadoSAP } from './sap-hana.service';
-import { NombreMatchingUtil } from '@/utils/nombre-matching.util';
+import { SapHanaService, UsuarioHANA, EmpleadoSAP } from './sap-hana.service';
+import { LdapService, LDAPUserInfo } from '../auth/ldap.service';
+import { ConfigService } from '@nestjs/config';
 
-export interface ResultadoSincronizacion {
-  empleadosProcesados: number;
+export interface SyncResult {
+  success: boolean;
+  message: string;
+  data?: {
   usuariosCreados: number;
   usuariosActualizados: number;
   usuariosDesactivados: number;
-  // 🆕 Agregar sedes
-  sedesCreadas: number;
-  sedesActualizadas: number;
-  areasCreadas: number;
-  areasActualizadas: number;
-  cargosCreados: number;
-  cargosActualizados: number;
   errores: string[];
-  advertencias: string[];
-  detalles: any[];
+    detalles: {
+      empleadosProcesados: number;
+      empleadosSAP: number;
+      usuariosExistentes: number;
+    };
+  };
+  error?: string;
+}
+
+export interface SyncOptions {
+  forzarSincronizacion?: boolean;
+  soloActivos?: boolean;
+  validarLDAP?: boolean;
 }
 
 @Injectable()
 export class SapSyncService {
   private readonly logger = new Logger(SapSyncService.name);
+  private readonly cache = new Map<string, any>();
+  private readonly cacheTimeout = 5 * 60 * 1000; // 5 minutos
 
   constructor(
-    private readonly prisma: PrismaService,
-    private readonly sapHanaService: SapHanaService
+    private readonly sapHanaService: SapHanaService,
+    private readonly ldapService: LdapService,
+    private readonly configService: ConfigService,
   ) {}
 
   /**
-   * Ejecuta la sincronización completa con SAP HANA B1
+   * Sincronización completa de usuarios con SAP HANA
    */
-  async sincronizarCompleto(): Promise<ResultadoSincronizacion> {
-    const resultado: ResultadoSincronizacion = {
-      empleadosProcesados: 0,
+  async sincronizarUsuariosCompleto(options: SyncOptions = {}): Promise<SyncResult> {
+    const startTime = Date.now();
+    this.logger.log('🔄 Iniciando sincronización completa de usuarios...');
+
+    const resultado: SyncResult = {
+      success: false,
+      message: '',
+      data: {
       usuariosCreados: 0,
       usuariosActualizados: 0,
       usuariosDesactivados: 0,
-      sedesCreadas: 0,
-      sedesActualizadas: 0,
-      areasCreadas: 0,
-      areasActualizadas: 0,
-      cargosCreados: 0,
-      cargosActualizados: 0,
       errores: [],
-      advertencias: [],
-      detalles: []
+        detalles: {
+          empleadosProcesados: 0,
+          empleadosSAP: 0,
+          usuariosExistentes: 0,
+        },
+      },
     };
 
     try {
-      this.logger.log('🔄 Iniciando sincronización completa con SAP HANA B1...');
+      // PASO 1: Validar conexión SAP
+      await this.validarConexionSAP();
 
-      // 1. Verificar conexión a SAP
-      if (!this.sapHanaService.isConnectionActive()) {
-        throw new Error('No hay conexión activa a SAP HANA B1');
+      // PASO 2: Obtener datos de SAP HANA
+      this.logger.log('🔄 Obteniendo empleados de SAP...');
+      const empleadosSAP = await this.obtenerEmpleadosSAP(options.soloActivos);
+      
+      this.logger.log('🔄 Obteniendo usuarios existentes...');
+      const usuariosExistentes = await this.obtenerUsuariosExistentes();
+      
+      this.logger.log('🔄 Obteniendo roles...');
+      const roles = await this.obtenerRolesExistentes();
+
+      resultado.data!.detalles.empleadosSAP = empleadosSAP.length;
+      resultado.data!.detalles.usuariosExistentes = usuariosExistentes.length;
+
+      this.logger.log(`📊 Datos obtenidos: ${empleadosSAP.length} empleados SAP, ${usuariosExistentes.length} usuarios existentes, ${roles.length} roles`);
+
+      // Verificar si tenemos datos para procesar
+      if (empleadosSAP.length === 0) {
+        this.logger.warn('⚠️ No se encontraron empleados SAP para procesar');
+        resultado.success = true;
+        resultado.message = 'No se encontraron empleados SAP para sincronizar';
+        return resultado;
       }
 
-      // 2. Obtener datos de SAP
-      const empleadosSAP = await this.sapHanaService.obtenerEmpleadosActivos();
-      resultado.empleadosProcesados = empleadosSAP.length;
+      if (roles.length === 0) {
+        this.logger.warn('⚠️ No se encontraron roles para asignar a usuarios');
+        resultado.success = false;
+        resultado.error = 'No se encontraron roles en la base de datos';
+        resultado.message = 'Error: No hay roles disponibles para asignar a usuarios';
+        return resultado;
+      }
 
-      this.logger.log(`📊 Obtenidos ${empleadosSAP.length} empleados activos de SAP`);
-
-      // 3. Sincronizar sedes
-      const resultadoSedes = await this.sincronizarSedes(empleadosSAP);
-      resultado.sedesCreadas = resultadoSedes.creadas;
-      resultado.sedesActualizadas = resultadoSedes.actualizadas;
-      resultado.errores.push(...resultadoSedes.errores);
-
-      // 4. Sincronizar áreas
-      const resultadoAreas = await this.sincronizarAreas(empleadosSAP);
-      resultado.areasCreadas = resultadoAreas.creadas;
-      resultado.areasActualizadas = resultadoAreas.actualizadas;
-      resultado.errores.push(...resultadoAreas.errores);
-
-      // 5. Sincronizar cargos
-      const resultadoCargos = await this.sincronizarCargos(empleadosSAP);
-      resultado.cargosCreados = resultadoCargos.creados;
-      resultado.cargosActualizados = resultadoCargos.actualizados;
-      resultado.errores.push(...resultadoCargos.errores);
-
-      // 6. Sincronizar usuarios
-      const resultadoUsuarios = await this.sincronizarUsuarios(empleadosSAP);
-      resultado.usuariosCreados = resultadoUsuarios.creados;
-      resultado.usuariosActualizados = resultadoUsuarios.actualizados;
-      resultado.usuariosDesactivados = resultadoUsuarios.desactivados;
-      resultado.errores.push(...resultadoUsuarios.errores);
-      resultado.advertencias.push(...resultadoUsuarios.advertencias);
-      resultado.detalles.push(...resultadoUsuarios.detalles);
-
-      this.logger.log('✅ Sincronización completa finalizada exitosamente');
-
-    } catch (error) {
-      this.logger.error('❌ Error en sincronización completa:', error);
-      resultado.errores.push(`Error general: ${error.message}`);
-    }
-
-    return resultado;
-  }
-
-  /**
-   * Valida que las 4 sedes predefinidas existan en la base de datos
-   * Enfoque manual: sedes 1=Santa Cruz, 2=La Paz, 3=Cochabamba, 4=Interior
-   */
-  private async sincronizarSedes(empleadosSAP: EmpleadoSAP[]): Promise<{
-    creadas: number;
-    actualizadas: number;
-    errores: string[];
-  }> {
-    const resultado = { creadas: 0, actualizadas: 0, errores: [] };
-
-    try {
-      // Obtener sedes IDs únicos que vienen de SAP
-      const sedesUsadas = new Set(empleadosSAP.map(emp => emp.workCity));
-      this.logger.log(`🏢 Validando sedes usadas por empleados SAP: ${Array.from(sedesUsadas).join(', ')}`);
-
-      // Validar que las sedes predefinidas existen (1-4)
-      const sedesPredefinidas = [1, 2, 3, 4];
-      for (const sedeId of sedesPredefinidas) {
+      // PASO 3: Procesar cada empleado SAP
+      for (const empleado of empleadosSAP) {
         try {
-          const sedeExistente = await this.prisma.sede.findUnique({
-            where: { id: sedeId }
-          });
-
-          if (!sedeExistente) {
-            resultado.errores.push(`❌ Sede predefinida ${sedeId} no existe en la base de datos. Usuario debe crearla.`);
-          } else if (!sedeExistente.activo) {
-            // Reactivar sede si está inactiva
-            await this.prisma.sede.update({
-              where: { id: sedeId },
-              data: { activo: true }
-            });
-            resultado.actualizadas++;
-            this.logger.log(`🔄 Sede ${sedeId} (${sedeExistente.nombre}) reactivada`);
-          }
+          await this.procesarEmpleadoSAP(empleado, usuariosExistentes, roles, options, resultado);
+          resultado.data!.detalles.empleadosProcesados++;
         } catch (error) {
-          resultado.errores.push(`Error validando sede ${sedeId}: ${error.message}`);
+          const errorMsg = `Error procesando empleado ${empleado.empID}: ${error.message}`;
+          resultado.data!.errores.push(errorMsg);
+          this.logger.error(errorMsg);
         }
       }
 
-      // Verificar que todas las sedes usadas por empleados existen
-      for (const sedeId of sedesUsadas) {
-        if (!sedesPredefinidas.includes(sedeId)) {
-          resultado.errores.push(`⚠️ Empleados asignados a sede ${sedeId} que no está en sedes predefinidas (1-4)`);
-        }
-      }
+      // PASO 4: Desactivar usuarios que ya no están en SAP
+      await this.desactivarUsuariosInactivos(empleadosSAP, resultado);
+
+      // PASO 5: Validar resultados
+      const totalProcesados = resultado.data!.usuariosCreados + resultado.data!.usuariosActualizados;
+      const tiempoTotal = Date.now() - startTime;
+
+      resultado.success = true;
+      resultado.message = `Sincronización completada exitosamente en ${tiempoTotal}ms. ${totalProcesados} usuarios procesados, ${resultado.data!.usuariosDesactivados} desactivados.`;
+
+      this.logger.log(`✅ Sincronización completada: ${resultado.message}`);
 
     } catch (error) {
-      resultado.errores.push(`Error general en validación de sedes: ${error.message}`);
+      resultado.success = false;
+      resultado.error = error.message;
+      resultado.message = 'Error en la sincronización completa';
+      this.logger.error(`❌ Error en sincronización: ${error.message}`);
     }
 
     return resultado;
   }
 
   /**
-   * Sincroniza las áreas/departamentos
+   * Sincronización unificada: SAP + LDAP con estructura simplificada
    */
-  private async sincronizarAreas(empleadosSAP: EmpleadoSAP[]): Promise<{
-    creadas: number;
-    actualizadas: number;
-    errores: string[];
-  }> {
-    const resultado = { creadas: 0, actualizadas: 0, errores: [] };
-
-    try {
-      // 🆕 Crear área por defecto para empleados sin área asignada
-      const areaDefault = await this.prisma.area.upsert({
-        where: { areaSapId: -999 }, // ID especial para área por defecto
-        update: {},
-        create: {
-          nombre: 'Sin Área Asignada',
-          areaSapId: -999,
-          nombreSap: 'SIN AREA',
-          sedeId: 1, // Santa Cruz por defecto
-          descripcion: 'Área por defecto para empleados sin área asignada en SAP'
-        }
-      });
-
-      // Obtener áreas únicas de SAP (incluyendo las válidas)
-      const areasSAP = empleadosSAP
-        .filter(emp => emp.ID_Area && emp.Nombre_Area)
-        .reduce((acc, emp) => {
-          const key = emp.ID_Area;
-          if (!acc.has(key)) {
-            acc.set(key, {
-              ID_Area: emp.ID_Area,
-              Nombre_Area: emp.Nombre_Area.trim()
-            });
-          }
-          return acc;
-        }, new Map());
-
-      this.logger.log(`🏢 Sincronizando ${areasSAP.size} áreas de SAP + área por defecto...`);
-
-      for (const [sapAreaId, areaSAP] of areasSAP) {
-        try {
-          // Buscar área existente por SAP ID
-          let areaExistente = await this.prisma.area.findFirst({
-            where: { areaSapId: sapAreaId }
-          });
-
-          if (!areaExistente) {
-            // Buscar por nombre similar
-            const areasLocales = await this.prisma.area.findMany({
-              where: { activo: true }
-            });
-
-            const matchPorNombre = NombreMatchingUtil.encontrarMejorMatch(
-              areaSAP.Nombre_Area,
-              areasLocales.map(a => a.nombre),
-              85
-            );
-
-            if (matchPorNombre.match && matchPorNombre.indice >= 0) {
-              areaExistente = areasLocales[matchPorNombre.indice];
-              
-              // Actualizar con SAP ID
-              await this.prisma.area.update({
-                where: { id: areaExistente.id },
-                data: {
-                  areaSapId: sapAreaId,
-                  nombreSap: areaSAP.Nombre_Area
-                }
-              });
-              
-              resultado.actualizadas++;
-              this.logger.log(`🔄 Área vinculada: "${areaExistente.nombre}" ↔ SAP: "${areaSAP.Nombre_Area}"`);
-              continue;
-            }
-          }
-
-          if (areaExistente) {
-            // Actualizar área existente
-            await this.prisma.area.update({
-              where: { id: areaExistente.id },
-              data: {
-                nombreSap: areaSAP.Nombre_Area,
-                // Solo actualizar nombre si es muy diferente
-                ...(NombreMatchingUtil.calcularSimilitud(areaExistente.nombre, areaSAP.Nombre_Area) < 90 && {
-                  nombre: areaSAP.Nombre_Area
-                })
-              }
-            });
-            resultado.actualizadas++;
-          } else {
-            // Crear nueva área - necesitamos asignarla a una sede por defecto
-            const sedeDefault = await this.prisma.sede.findFirst({
-              where: { activo: true },
-              orderBy: { id: 'asc' }
-            });
-
-            if (!sedeDefault) {
-              resultado.errores.push(`No hay sedes disponibles para crear el área: ${areaSAP.Nombre_Area}`);
-              continue;
-            }
-
-            await this.prisma.area.create({
-              data: {
-                nombre: areaSAP.Nombre_Area,
-                areaSapId: sapAreaId,
-                nombreSap: areaSAP.Nombre_Area,
-                sedeId: sedeDefault.id,
-                descripcion: `Área sincronizada desde SAP HANA B1`
-              }
-            });
-            resultado.creadas++;
-            this.logger.log(`➕ Nueva área creada: "${areaSAP.Nombre_Area}"`);
-          }
-
-        } catch (error) {
-          resultado.errores.push(`Error procesando área ${areaSAP.Nombre_Area}: ${error.message}`);
-        }
-      }
-
-    } catch (error) {
-      resultado.errores.push(`Error general en sincronización de áreas: ${error.message}`);
-    }
-
-    return resultado;
-  }
-
-  /**
-   * Sincroniza los cargos/posiciones
-   */
-  private async sincronizarCargos(empleadosSAP: EmpleadoSAP[]): Promise<{
-    creados: number;
-    actualizados: number;
-    errores: string[];
-  }> {
-    const resultado = { creados: 0, actualizados: 0, errores: [] };
-
-    try {
-      // 🆕 Crear cargo por defecto para empleados sin cargo específico
-      const areaDefault = await this.prisma.area.findFirst({
-        where: { areaSapId: -999 }
-      });
-
-      if (areaDefault) {
-        const rolDefault = await this.prisma.rol.findFirst({
-          where: { activo: true },
-          orderBy: { id: 'asc' }
-        });
-
-        if (rolDefault) {
-          await this.prisma.cargo.upsert({
-            where: { 
-              cargoSap_areaId: {
-                cargoSap: 'SIN CARGO',
-                areaId: areaDefault.id
-              }
-            },
-            update: {},
-            create: {
-              nombre: 'Sin Cargo Asignado',
-              cargoSap: 'SIN CARGO',
-              areaId: areaDefault.id,
-              rolId: rolDefault.id,
-              sincronizadoSap: true,
-              descripcion: 'Cargo por defecto para empleados sin cargo específico en SAP'
-            }
-          });
-        }
-      }
-
-      // Obtener cargos únicos de SAP por área (incluyendo todos los cargos, incluso "SIN CARGO")
-      const cargosSAP = empleadosSAP
-        .filter(emp => emp.Cargo) // Solo filtrar que tenga algún cargo
-        .reduce((acc, emp) => {
-          // Usar área por defecto si no tiene área asignada
-          const areaId = emp.ID_Area || -999;
-          const cargo = emp.Cargo.trim();
-          
-          const key = `${cargo}_${areaId}`;
-          if (!acc.has(key)) {
-            acc.set(key, {
-              cargo: cargo,
-              areaId: areaId
-            });
-          }
-          return acc;
-        }, new Map());
-
-      this.logger.log(`👔 Sincronizando ${cargosSAP.size} cargos de SAP (incluyendo casos especiales)...`);
-
-      for (const [_, cargoSAP] of cargosSAP) {
-        try {
-          // Buscar el área local correspondiente
-          let areaLocal = await this.prisma.area.findFirst({
-            where: { areaSapId: cargoSAP.areaId }
-          });
-
-          // Si no encuentra el área, usar el área por defecto
-          if (!areaLocal) {
-            areaLocal = await this.prisma.area.findFirst({
-              where: { areaSapId: -999 }
-            });
-            
-            if (!areaLocal) {
-              resultado.errores.push(`Área con SAP ID ${cargoSAP.areaId} no encontrada y área por defecto no disponible para cargo: ${cargoSAP.cargo}`);
-              continue;
-            }
-          }
-
-          // Buscar cargo existente
-          let cargoExistente = await this.prisma.cargo.findFirst({
-            where: {
-              cargoSap: cargoSAP.cargo,
-              areaId: areaLocal.id
-            }
-          });
-
-          if (!cargoExistente) {
-            // Buscar por nombre similar en la misma área con umbral más bajo
-            const cargosLocales = await this.prisma.cargo.findMany({
-              where: { 
-                areaId: areaLocal.id,
-                activo: true 
-              }
-            });
-
-            // 🆕 Intentar matching con umbral más bajo para variaciones menores
-            const matchPorNombre = NombreMatchingUtil.encontrarMejorMatch(
-              cargoSAP.cargo,
-              cargosLocales.map(c => c.nombre),
-              75 // Reducido de 85 a 75 para capturar más variaciones
-            );
-
-            if (matchPorNombre.match && matchPorNombre.indice >= 0) {
-              cargoExistente = cargosLocales[matchPorNombre.indice];
-              
-              // Actualizar con SAP mapping
-              await this.prisma.cargo.update({
-                where: { id: cargoExistente.id },
-                data: {
-                  cargoSap: cargoSAP.cargo,
-                  sincronizadoSap: true
-                }
-              });
-              
-              resultado.actualizados++;
-              this.logger.log(`🔄 Cargo vinculado: "${cargoExistente.nombre}" ↔ SAP: "${cargoSAP.cargo}" (${matchPorNombre.similitud}%)`);
-              continue;
-            }
-          }
-
-          if (cargoExistente) {
-            // Actualizar cargo existente
-            await this.prisma.cargo.update({
-              where: { id: cargoExistente.id },
-              data: {
-                sincronizadoSap: true,
-                // Solo actualizar nombre si es muy diferente
-                ...(NombreMatchingUtil.calcularSimilitud(cargoExistente.nombre, cargoSAP.cargo) < 90 && {
-                  nombre: cargoSAP.cargo
-                })
-              }
-            });
-            resultado.actualizados++;
-          } else {
-            // Crear nuevo cargo - necesita un rol por defecto
-            const rolDefault = await this.prisma.rol.findFirst({
-              where: { activo: true },
-              orderBy: { id: 'asc' }
-            });
-
-            if (!rolDefault) {
-              resultado.errores.push(`No hay roles disponibles para crear el cargo: ${cargoSAP.cargo}`);
-              continue;
-            }
-
-            await this.prisma.cargo.create({
-              data: {
-                nombre: cargoSAP.cargo,
-                cargoSap: cargoSAP.cargo,
-                areaId: areaLocal.id,
-                rolId: rolDefault.id,
-                sincronizadoSap: true,
-                descripcion: `Cargo sincronizado desde SAP HANA B1`
-              }
-            });
-            resultado.creados++;
-            this.logger.log(`➕ Nuevo cargo creado: "${cargoSAP.cargo}" en área "${areaLocal.nombre}"`);
-          }
-
-        } catch (error) {
-          resultado.errores.push(`Error procesando cargo ${cargoSAP.cargo}: ${error.message}`);
-        }
-      }
-
-    } catch (error) {
-      resultado.errores.push(`Error general en sincronización de cargos: ${error.message}`);
-    }
-
-    return resultado;
-  }
-
-  /**
-   * Sincroniza los usuarios/empleados
-   */
-  private async sincronizarUsuarios(empleadosSAP: EmpleadoSAP[]): Promise<{
-    creados: number;
-    actualizados: number;
-    desactivados: number;
-    errores: string[];
-    advertencias: string[];
-    detalles: any[];
-  }> {
-    const resultado = { 
-      creados: 0, 
-      actualizados: 0, 
-      desactivados: 0, 
-      errores: [], 
-      advertencias: [],
-      detalles: []
+  async sincronizarUsuariosUnificado(options: SyncOptions = {}): Promise<SyncResult> {
+    this.logger.log('🔄 Iniciando sincronización unificada SAP + LDAP...');
+    
+    const startTime = Date.now();
+    const resultado: SyncResult = {
+      success: false,
+      message: '',
+      data: {
+        usuariosCreados: 0,
+        usuariosActualizados: 0,
+        usuariosDesactivados: 0,
+        errores: [],
+        detalles: {
+          empleadosProcesados: 0,
+          empleadosSAP: 0,
+          usuariosExistentes: 0,
+        },
+      },
     };
 
     try {
-      this.logger.log(`👥 Sincronizando ${empleadosSAP.length} usuarios de SAP...`);
+      // PASO 1: Validar conexión SAP
+      await this.validarConexionSAP();
 
-      // Obtener usuarios existentes
-      const usuariosExistentes = await this.prisma.usuario.findMany({
-        select: {
-          id: true,
-          empleadoSapId: true,
-          nombre: true,
-          apellido: true,
-          nombreCompletoSap: true,
-          activo: true
-        }
-      });
+      // PASO 2: Obtener datos de SAP HANA
+      this.logger.log('🔄 Obteniendo empleados de SAP...');
+      const empleadosSAP = await this.obtenerEmpleadosSAP(options.soloActivos);
+      
+      this.logger.log('🔄 Obteniendo usuarios existentes...');
+      const usuariosExistentes = await this.obtenerUsuariosExistentes();
+      
+      this.logger.log('🔄 Obteniendo roles...');
+      const roles = await this.obtenerRolesExistentes();
 
-      const idsEmpleadosSAP = new Set(empleadosSAP.map(emp => emp.ID_Empleado));
+      resultado.data!.detalles.empleadosSAP = empleadosSAP.length;
+      resultado.data!.detalles.usuariosExistentes = usuariosExistentes.length;
 
-      // Procesar cada empleado de SAP
-      for (const empleadoSAP of empleadosSAP) {
+      this.logger.log(`📊 Datos obtenidos: ${empleadosSAP.length} empleados SAP, ${usuariosExistentes.length} usuarios existentes, ${roles.length} roles`);
+
+      // PASO 3: Obtener usuarios LDAP para matching
+      this.logger.log('🔄 Obteniendo usuarios de LDAP...');
+      const usuariosLDAP = await this.obtenerUsuariosLDAP();
+
+      this.logger.log(`📊 Usuarios LDAP obtenidos: ${usuariosLDAP.length}`);
+
+      // PASO 4: Procesar cada empleado SAP con validación LDAP
+      for (const empleado of empleadosSAP) {
         try {
-          const detalleEmpleado = {
-            sapId: empleadoSAP.ID_Empleado,
-            nombre: empleadoSAP.Nombre_Completo,
-            accion: '',
-            resultado: '',
-            similitud: 0
-          };
-
-          // 1. Buscar usuario existente por SAP ID
-          let usuarioExistente = usuariosExistentes.find(u => u.empleadoSapId === empleadoSAP.ID_Empleado);
-
-          // 2. Si no existe, buscar por nombre
-          if (!usuarioExistente) {
-            const matchResult = NombreMatchingUtil.buscarUsuarioPorNombre(
-              empleadoSAP.Nombre_Completo,
-              usuariosExistentes.filter(u => !u.empleadoSapId), // Solo usuarios sin SAP ID
-              80
-            );
-
-            if (matchResult.usuario) {
-              usuarioExistente = matchResult.usuario;
-              detalleEmpleado.similitud = matchResult.similitud;
-              
-              const confiabilidad = NombreMatchingUtil.esMatchConfiable(
-                matchResult.similitud,
-                empleadoSAP.Nombre_Completo.length,
-                matchResult.estrategia
-              );
-
-              if (!confiabilidad.esConfiable) {
-                resultado.advertencias.push(
-                  `Match poco confiable: SAP "${empleadoSAP.Nombre_Completo}" vs Sistema "${usuarioExistente.nombre} ${usuarioExistente.apellido}" (${matchResult.similitud}%)`
-                );
-              }
-            }
-          }
-
-          // 3. Validar que la sede existe
-          const sedeId = empleadoSAP.workCity;
-          const sedeExistente = await this.prisma.sede.findUnique({
-            where: { id: sedeId }
-          });
-
-          if (!sedeExistente) {
-            resultado.errores.push(
-              `Sede ${sedeId} no encontrada para empleado ${empleadoSAP.Nombre_Completo}`
-            );
-            detalleEmpleado.accion = 'error';
-            detalleEmpleado.resultado = `Sede ${sedeId} no existe`;
-            resultado.detalles.push(detalleEmpleado);
-            continue;
-          }
-
-          // 4. Obtener área y cargo correspondientes
-          let areaLocal = await this.prisma.area.findFirst({
-            where: { areaSapId: empleadoSAP.ID_Area }
-          });
-
-          // 🆕 Si no tiene área asignada en SAP, usar área por defecto
-          if (!areaLocal) {
-            areaLocal = await this.prisma.area.findFirst({
-              where: { areaSapId: -999 } // Área por defecto
-            });
-          }
-
-          let cargoLocal = await this.prisma.cargo.findFirst({
-            where: {
-              cargoSap: empleadoSAP.Cargo,
-              areaId: areaLocal?.id
-            }
-          });
-
-          // 🆕 Si no encuentra el cargo, intentar en el área por defecto
-          if (!cargoLocal && areaLocal) {
-            // Si el cargo es "SIN CARGO" o vacío, buscar el cargo por defecto
-            if (!empleadoSAP.Cargo || empleadoSAP.Cargo.trim() === 'SIN CARGO' || empleadoSAP.Cargo.trim() === '') {
-              cargoLocal = await this.prisma.cargo.findFirst({
-                where: {
-                  cargoSap: 'SIN CARGO',
-                  areaId: areaLocal.id
-                }
-              });
-            } else {
-              // Buscar el cargo con matching más flexible en cualquier área
-              const todosCargos = await this.prisma.cargo.findMany({
-                where: { 
-                  activo: true,
-                  sincronizadoSap: true
-                }
-              });
-
-              const matchCargo = NombreMatchingUtil.encontrarMejorMatch(
-                empleadoSAP.Cargo,
-                todosCargos.map(c => c.cargoSap || c.nombre),
-                70 // Umbral más bajo para matching flexible
-              );
-
-              if (matchCargo.match && matchCargo.indice >= 0) {
-                cargoLocal = todosCargos[matchCargo.indice];
-                this.logger.log(`🔄 Empleado ${empleadoSAP.Nombre_Completo}: cargo "${empleadoSAP.Cargo}" matcheado con "${cargoLocal.nombre}" (${matchCargo.similitud}%)`);
-              }
-            }
-          }
-
-          if (!areaLocal || !cargoLocal) {
-            resultado.errores.push(
-              `Área o cargo no encontrado para empleado ${empleadoSAP.Nombre_Completo}: Área SAP ${empleadoSAP.ID_Area}, Cargo SAP "${empleadoSAP.Cargo}"`
-            );
-            detalleEmpleado.accion = 'error';
-            detalleEmpleado.resultado = 'Área o cargo no encontrado';
-            resultado.detalles.push(detalleEmpleado);
-            continue;
-          }
-
-          if (usuarioExistente) {
-            // Actualizar usuario existente
-            await this.prisma.usuario.update({
-              where: { id: usuarioExistente.id },
-              data: {
-                empleadoSapId: empleadoSAP.ID_Empleado,
-                nombreCompletoSap: empleadoSAP.Nombre_Completo,
-                jefeDirectoSapId: empleadoSAP.ID_Jefe_Inmediato,
-                sedeId: sedeId, // Usar workCity directamente
-                areaId: areaLocal.id,
-                cargoId: cargoLocal.id,
-                ultimaSincronizacion: new Date(),
-                activo: true
-              }
-            });
-            
-            resultado.actualizados++;
-            detalleEmpleado.accion = 'actualizado';
-            detalleEmpleado.resultado = 'Usuario actualizado exitosamente';
-            
-          } else {
-            // Crear nuevo usuario
-            // Generar username único basado en el nombre
-            const [nombre, ...apellidos] = empleadoSAP.Nombre_Completo.trim().split(' ');
-            const apellido = apellidos.join(' ') || '';
-            const username = await this.generarUsernameUnico(nombre, apellido);
-
-            await this.prisma.usuario.create({
-              data: {
-                username,
-                email: `${username}@empresa.com`, // Email temporal
-                nombre,
-                apellido,
-                empleadoSapId: empleadoSAP.ID_Empleado,
-                nombreCompletoSap: empleadoSAP.Nombre_Completo,
-                jefeDirectoSapId: empleadoSAP.ID_Jefe_Inmediato,
-                autenticacion: 'ldap',
-                sedeId: sedeId, // Usar workCity directamente
-                areaId: areaLocal.id,
-                cargoId: cargoLocal.id,
-                ultimaSincronizacion: new Date()
-              }
-            });
-            
-            resultado.creados++;
-            detalleEmpleado.accion = 'creado';
-            detalleEmpleado.resultado = `Usuario creado con username: ${username}`;
-          }
-
-          resultado.detalles.push(detalleEmpleado);
-
+          await this.procesarEmpleadoSAPUnificado(empleado, usuariosExistentes, roles, usuariosLDAP, resultado);
+          resultado.data!.detalles.empleadosProcesados++;
         } catch (error) {
-          resultado.errores.push(`Error procesando empleado ${empleadoSAP.Nombre_Completo}: ${error.message}`);
+          const errorMsg = `Error procesando empleado ${empleado.empID}: ${error.message}`;
+          resultado.data!.errores.push(errorMsg);
+          this.logger.error(errorMsg);
         }
       }
 
-      // Desactivar usuarios que ya no están en SAP (optimizado para listas grandes)
-      if (idsEmpleadosSAP.size > 0) {
-        // Procesar en lotes para evitar consultas SQL con demasiados parámetros
-        const batchSize = 100;
-        const idsArray = Array.from(idsEmpleadosSAP);
-        let totalDesactivados = 0;
+      // PASO 5: Desactivar usuarios que ya no están en SAP
+      await this.desactivarUsuariosInactivos(empleadosSAP, resultado);
 
-        // Primero obtener todos los usuarios con empleadoSapId activos
-        const usuariosConSapId = await this.prisma.usuario.findMany({
-          where: {
-            empleadoSapId: { not: null },
-            activo: true
-          },
-          select: { id: true, empleadoSapId: true, nombre: true, apellido: true }
-        });
+      // PASO 6: Validar resultados
+      const totalProcesados = resultado.data!.usuariosCreados + resultado.data!.usuariosActualizados;
+      const tiempoTotal = Date.now() - startTime;
 
-        // Identificar cuáles no están en la lista de SAP
-        const usuariosParaDesactivar = usuariosConSapId.filter(
-          usuario => !idsEmpleadosSAP.has(usuario.empleadoSapId!)
-        );
+      resultado.success = true;
+      resultado.message = `Sincronización unificada completada exitosamente en ${tiempoTotal}ms. ${totalProcesados} usuarios procesados, ${resultado.data!.usuariosDesactivados} desactivados.`;
 
-        if (usuariosParaDesactivar.length > 0) {
-          this.logger.log(`📉 Desactivando ${usuariosParaDesactivar.length} usuarios que ya no están en SAP...`);
-          
-          // Desactivar en lotes
-          for (let i = 0; i < usuariosParaDesactivar.length; i += batchSize) {
-            const lote = usuariosParaDesactivar.slice(i, i + batchSize);
-            const idsLote = lote.map(u => u.id);
-            
-            await this.prisma.usuario.updateMany({
-              where: { id: { in: idsLote } },
-              data: { activo: false }
-            });
-            
-            totalDesactivados += idsLote.length;
-            
-            // Log de progreso
-            this.logger.log(`  - Lote ${Math.ceil((i + 1) / batchSize)}: ${idsLote.length} usuarios desactivados`);
-          }
-          
-          resultado.desactivados = totalDesactivados;
-        }
-      }
+      this.logger.log(`✅ Sincronización unificada completada: ${resultado.message}`);
 
     } catch (error) {
-      resultado.errores.push(`Error general en sincronización de usuarios: ${error.message}`);
+      resultado.success = false;
+      resultado.error = error.message;
+      resultado.message = 'Error en la sincronización unificada';
+      this.logger.error(`❌ Error en sincronización unificada: ${error.message}`);
     }
 
     return resultado;
   }
 
   /**
-   * Genera un username único basado en nombre y apellido
+   * Sincronización con verificación individual de usuarios LDAP
    */
-  private async generarUsernameUnico(nombre: string, apellido: string): Promise<string> {
-    const baseUsername = `${nombre.toLowerCase()}.${apellido.toLowerCase().split(' ')[0]}`
-      .normalize('NFD')
-      .replace(/[\u0300-\u036f]/g, '')
-      .replace(/[^a-z.]/g, '');
+  async sincronizarUsuariosConVerificacionIndividual(): Promise<SyncResult> {
+    this.logger.log('🔄 Iniciando sincronización con verificación individual LDAP...');
+    
+    const startTime = Date.now();
+    const resultado: SyncResult = {
+      success: false,
+      message: '',
+      data: {
+        usuariosCreados: 0,
+        usuariosActualizados: 0,
+        usuariosDesactivados: 0,
+        errores: [],
+        detalles: {
+          empleadosProcesados: 0,
+          empleadosSAP: 0,
+          usuariosExistentes: 0,
+        },
+      },
+    };
 
-    let username = baseUsername;
-    let contador = 1;
+    try {
+      // PASO 1: Validar conexión SAP
+      await this.validarConexionSAP();
 
-    while (await this.prisma.usuario.findUnique({ where: { username } })) {
-      username = `${baseUsername}${contador}`;
-      contador++;
+      // PASO 2: Obtener datos de SAP HANA
+      this.logger.log('🔄 Obteniendo empleados de SAP...');
+      const empleadosSAP = await this.obtenerEmpleadosSAP(false); // Obtener todos, no solo activos
+      
+      this.logger.log('🔄 Obteniendo usuarios existentes...');
+      const usuariosExistentes = await this.obtenerUsuariosExistentes();
+      
+      this.logger.log('🔄 Obteniendo roles...');
+      const roles = await this.obtenerRolesExistentes();
+
+      resultado.data!.detalles.empleadosSAP = empleadosSAP.length;
+      resultado.data!.detalles.usuariosExistentes = usuariosExistentes.length;
+
+      this.logger.log(`📊 Datos obtenidos: ${empleadosSAP.length} empleados SAP, ${usuariosExistentes.length} usuarios existentes, ${roles.length} roles`);
+
+      // PASO 3: Obtener usuarios LDAP para matching
+      this.logger.log('🔄 Obteniendo usuarios de LDAP...');
+      const usuariosLDAP = await this.obtenerUsuariosLDAP();
+
+      this.logger.log(`📊 Usuarios LDAP obtenidos: ${usuariosLDAP.length}`);
+
+      // PASO 4: Procesar cada empleado SAP con validación LDAP
+      for (const empleado of empleadosSAP) {
+        try {
+          await this.procesarEmpleadoSAPUnificado(empleado, usuariosExistentes, roles, usuariosLDAP, resultado);
+          resultado.data!.detalles.empleadosProcesados++;
+        } catch (error) {
+          const errorMsg = `Error procesando empleado ${empleado.empID}: ${error.message}`;
+          resultado.data!.errores.push(errorMsg);
+          this.logger.error(errorMsg);
+        }
+      }
+
+      // PASO 5: Desactivar usuarios que ya no están en SAP
+      await this.desactivarUsuariosInactivos(empleadosSAP, resultado);
+
+      // PASO 6: Validar resultados
+      const totalProcesados = resultado.data!.usuariosCreados + resultado.data!.usuariosActualizados;
+      const tiempoTotal = Date.now() - startTime;
+
+      resultado.success = true;
+      resultado.message = `Sincronización LDAP + SAP completada exitosamente en ${tiempoTotal}ms. ${totalProcesados} usuarios procesados, ${resultado.data!.usuariosDesactivados} desactivados.`;
+
+      this.logger.log(`✅ Sincronización LDAP + SAP completada: ${resultado.message}`);
+
+    } catch (error) {
+      resultado.success = false;
+      resultado.error = error.message;
+      resultado.message = 'Error en la sincronización LDAP + SAP';
+      this.logger.error(`❌ Error en sincronización LDAP + SAP: ${error.message}`);
     }
 
-    return username;
+    return resultado;
   }
-} 
+
+  /**
+   * Validar conexión a SAP HANA
+   */
+  private async validarConexionSAP(): Promise<void> {
+    try {
+      await this.sapHanaService.testConnection();
+      this.logger.log('✅ Conexión SAP HANA validada');
+    } catch (error) {
+      throw new Error(`No se pudo conectar a SAP HANA: ${error.message}`);
+    }
+  }
+
+  /**
+   * Obtener empleados de SAP HANA
+   */
+  private async obtenerEmpleadosSAP(soloActivos: boolean = true): Promise<EmpleadoSAP[]> {
+    try {
+      const empleados = await this.sapHanaService.obtenerEmpleadosActivos();
+      
+      this.logger.log(`📊 Empleados obtenidos de SAP: ${empleados.length}`);
+      
+      if (soloActivos) {
+        // TEMPORALMENTE: Mostrar todos los empleados para debug
+        this.logger.log(`📊 Empleados totales obtenidos: ${empleados.length}`);
+        
+        if (empleados.length > 0) {
+          this.logger.log(`📊 Primeros 3 empleados para debug:`, empleados.slice(0, 3).map(emp => ({
+            empID: emp.empID,
+            nombre: emp.nombreCompletoSap,
+            activo: emp.activo,
+            tipoActivo: typeof emp.activo
+          })));
+        }
+        
+        // TEMPORALMENTE: Retornar todos los empleados sin filtrar para debug
+        this.logger.log(`📊 Retornando todos los empleados sin filtrar para debug`);
+        return empleados;
+        
+        // CÓDIGO ORIGINAL (comentado temporalmente):
+        // const empleadosActivos = empleados.filter(emp => {
+        //   const activoValue = emp.activo as any;
+        //   const esActivo = activoValue === true || activoValue === 1 || activoValue === 'Y' || activoValue === 'y';
+        //   return esActivo;
+        // });
+        // return empleadosActivos;
+      }
+      
+      return empleados;
+    } catch (error) {
+      throw new Error(`Error obteniendo empleados SAP: ${error.message}`);
+    }
+  }
+
+  /**
+   * Obtener usuarios existentes en la base de datos
+   */
+  private async obtenerUsuariosExistentes(): Promise<UsuarioHANA[]> {
+    try {
+      const usuarios = await this.sapHanaService.obtenerUsuarios();
+      this.logger.log(`📊 Usuarios existentes obtenidos: ${usuarios.length}`);
+      return usuarios;
+    } catch (error) {
+      this.logger.error(`❌ Error obteniendo usuarios existentes: ${error.message}`);
+      throw new Error(`Error obteniendo usuarios existentes: ${error.message}`);
+    }
+  }
+
+  /**
+   * Obtener roles existentes
+   */
+  private async obtenerRolesExistentes(): Promise<any[]> {
+    try {
+      const roles = await this.sapHanaService.obtenerRoles();
+      this.logger.log(`📊 Roles obtenidos: ${roles.length}`);
+      return roles;
+    } catch (error) {
+      this.logger.error(`❌ Error obteniendo roles: ${error.message}`);
+      throw new Error(`Error obteniendo roles: ${error.message}`);
+    }
+  }
+
+  /**
+   * Procesar un empleado SAP individual
+   */
+  private async procesarEmpleadoSAP(
+    empleado: EmpleadoSAP,
+    usuariosExistentes: UsuarioHANA[],
+    roles: any[],
+    options: SyncOptions,
+    resultado: SyncResult
+  ): Promise<void> {
+    // Buscar usuario existente por empID
+    const usuarioExistente = usuariosExistentes.find(u => u.empID === empleado.empID);
+
+    if (usuarioExistente) {
+      // Actualizar usuario existente
+      await this.actualizarUsuarioExistente(empleado, usuarioExistente, options, resultado);
+    } else {
+      // Crear nuevo usuario
+      await this.crearNuevoUsuario(empleado, roles, options, resultado);
+    }
+  }
+
+  /**
+   * Actualizar usuario existente
+   */
+  private async actualizarUsuarioExistente(
+    empleado: EmpleadoSAP,
+    usuarioExistente: UsuarioHANA,
+    options: SyncOptions,
+    resultado: SyncResult
+  ): Promise<void> {
+    const datosActualizacion: any = {
+      nombre: empleado.nombreCompletoSap.split(' ')[0] || empleado.nombreCompletoSap,
+      apellido: empleado.nombreCompletoSap.split(' ').slice(1).join(' ') || '',
+      nombreCompletoSap: empleado.nombreCompletoSap,
+      activo: empleado.activo,
+      ultimaSincronizacion: new Date(),
+    };
+
+    // Agregar información adicional si está disponible (solo campos que existen en la tabla)
+    if (empleado.jefeDirecto && typeof empleado.jefeDirecto === 'number') {
+      datosActualizacion.jefeDirectoSapId = empleado.jefeDirecto;
+    }
+
+    try {
+      await this.sapHanaService.actualizarUsuario(usuarioExistente.id, datosActualizacion);
+      resultado.data!.usuariosActualizados++;
+      this.logger.debug(`🔄 Usuario actualizado: ${empleado.nombreCompletoSap} (ID: ${empleado.empID})`);
+    } catch (error) {
+      throw new Error(`Error actualizando usuario ${empleado.empID}: ${error.message}`);
+    }
+  }
+
+  /**
+   * Crear nuevo usuario
+   */
+  private async crearNuevoUsuario(
+    empleado: EmpleadoSAP,
+    roles: any[],
+    options: SyncOptions,
+    resultado: SyncResult
+  ): Promise<void> {
+    // Obtener rol por defecto (ID = 3)
+    const rolPorDefecto = await this.sapHanaService.obtenerRolPorId(3);
+    
+    if (!rolPorDefecto) {
+      throw new Error('No se encontró el rol por defecto con ID = 3');
+    }
+
+    const datosUsuario: any = {
+      empID: empleado.empID,
+      username: this.generarUsername(empleado),
+      email: this.generarEmail(empleado),
+      nombre: empleado.nombreCompletoSap.split(' ')[0] || empleado.nombreCompletoSap,
+      apellido: empleado.nombreCompletoSap.split(' ').slice(1).join(' ') || '',
+      nombreCompletoSap: empleado.nombreCompletoSap,
+      autenticacion: 'LOCAL',
+      activo: empleado.activo,
+      ROLID: rolPorDefecto.id, // Usar ROLID para mantener consistencia
+      ultimaSincronizacion: new Date(),
+    };
+
+    // Agregar información adicional si está disponible (solo campos que existen en la tabla)
+    if (empleado.jefeDirecto && typeof empleado.jefeDirecto === 'number') {
+      datosUsuario.jefeDirectoSapId = empleado.jefeDirecto;
+    }
+
+    // Validar con LDAP si está habilitado (temporalmente comentado)
+    // if (options.validarLDAP) {
+    //   await this.validarUsuarioConLDAP(datosUsuario);
+    // }
+
+    try {
+      await this.sapHanaService.crearUsuario(datosUsuario);
+      resultado.data!.usuariosCreados++;
+      this.logger.log(`👤 Nuevo usuario creado: ${empleado.nombreCompletoSap} (ID: ${empleado.empID})`);
+    } catch (error) {
+      throw new Error(`Error creando usuario ${empleado.empID}: ${error.message}`);
+    }
+  }
+
+  /**
+   * Desactivar usuarios que ya no están en SAP
+   */
+  private async desactivarUsuariosInactivos(
+    empleadosSAP: EmpleadoSAP[],
+    resultado: SyncResult
+  ): Promise<void> {
+    const empIDsActivos = empleadosSAP.map(e => e.empID);
+    
+    try {
+      const usuariosInactivos = await this.sapHanaService.obtenerUsuarios();
+      const usuariosADesactivar = usuariosInactivos.filter(u => 
+        u.empID && !empIDsActivos.includes(u.empID) && u.activo
+      );
+
+      for (const usuario of usuariosADesactivar) {
+        try {
+          await this.sapHanaService.actualizarUsuario(usuario.id, {
+            activo: false,
+            ultimaSincronizacion: new Date(),
+          });
+          resultado.data!.usuariosDesactivados++;
+          this.logger.log(`🚫 Usuario desactivado: ${usuario.nombreCompletoSap} (ID: ${usuario.empID})`);
+        } catch (error) {
+          const errorMsg = `Error desactivando usuario ${usuario.empID}: ${error.message}`;
+          resultado.data!.errores.push(errorMsg);
+          this.logger.error(errorMsg);
+        }
+      }
+        } catch (error) {
+      throw new Error(`Error obteniendo usuarios para desactivación: ${error.message}`);
+    }
+  }
+
+  /**
+   * Validar usuario con LDAP
+   */
+  private async validarUsuarioConLDAP(datosUsuario: any): Promise<void> {
+    try {
+      // Intentar buscar usuario en LDAP por nombre
+      const usuariosLDAP = await this.ldapService.searchAllUsers();
+      
+      // Buscar usuario por nombre en la lista de usuarios LDAP
+      const usuarioLDAP = usuariosLDAP.find(u => 
+        u.nombre.toLowerCase().includes(datosUsuario.nombre.toLowerCase()) ||
+        u.apellido.toLowerCase().includes(datosUsuario.apellido.toLowerCase())
+      );
+      
+      if (usuarioLDAP) {
+        // Si se encuentra en LDAP, cambiar autenticación
+        datosUsuario.autenticacion = 'LDAP';
+        datosUsuario.username = usuarioLDAP.username;
+        datosUsuario.email = usuarioLDAP.email;
+        this.logger.debug(`🔍 Usuario encontrado en LDAP: ${datosUsuario.nombreCompletoSap}`);
+      }
+    } catch (error) {
+      this.logger.warn(`⚠️ Error validando usuario con LDAP: ${error.message}`);
+      // No lanzar error para permitir que continúe la sincronización
+    }
+  }
+
+  /**
+   * Generar username único
+   */
+  private generarUsername(empleado: EmpleadoSAP): string {
+    const nombre = empleado.nombreCompletoSap.split(' ')[0]?.toLowerCase() || 'usuario';
+    const apellido = empleado.nombreCompletoSap.split(' ').slice(1).join('').toLowerCase() || '';
+    return `${nombre}${apellido}${empleado.empID}`.replace(/[^a-z0-9]/g, '');
+  }
+
+  /**
+   * Generar email
+   */
+  private generarEmail(empleado: EmpleadoSAP): string {
+    const username = this.generarUsername(empleado);
+    return `${username}@minoil.com.bo`;
+  }
+
+  /**
+   * Limpiar cache
+   */
+  private limpiarCache(): void {
+    const ahora = Date.now();
+    for (const [key, value] of this.cache.entries()) {
+      if (ahora - value.timestamp > this.cacheTimeout) {
+        this.cache.delete(key);
+      }
+    }
+  }
+
+  /**
+   * Obtener datos del cache
+   */
+  private obtenerDelCache<T>(key: string): T | null {
+    this.limpiarCache();
+    const cached = this.cache.get(key);
+    if (cached && Date.now() - cached.timestamp < this.cacheTimeout) {
+      return cached.data;
+    }
+    return null;
+  }
+
+  /**
+   * Guardar datos en cache
+   */
+  private guardarEnCache<T>(key: string, data: T): void {
+    this.cache.set(key, {
+      data,
+      timestamp: Date.now(),
+    });
+  }
+
+  /**
+   * Obtener usuarios de LDAP
+   */
+  private async obtenerUsuariosLDAP(): Promise<LDAPUserInfo[]> {
+    try {
+      const usuarios = await this.ldapService.searchAllUsers();
+      this.logger.log(`📊 Usuarios LDAP obtenidos: ${usuarios.length}`);
+      return usuarios;
+    } catch (error) {
+      this.logger.warn(`⚠️ Error obteniendo usuarios LDAP: ${error.message}`);
+      return []; // Retornar array vacío si falla LDAP
+    }
+  }
+
+  /**
+   * Procesar empleado SAP con estructura simplificada (sin cargos, áreas, regional)
+   */
+  private async procesarEmpleadoSAPUnificado(
+    empleado: EmpleadoSAP,
+    usuariosExistentes: UsuarioHANA[],
+    roles: any[],
+    usuariosLDAP: LDAPUserInfo[],
+    resultado: SyncResult
+  ): Promise<void> {
+    // Buscar usuario existente por empID
+    const usuarioExistente = usuariosExistentes.find(u => u.empID === empleado.empID);
+
+    // Buscar usuario LDAP correspondiente
+    const usuarioLDAP = this.buscarUsuarioLDAP(empleado, usuariosLDAP);
+
+    if (usuarioExistente) {
+      // Actualizar usuario existente
+      await this.actualizarUsuarioExistenteUnificado(empleado, usuarioExistente, usuarioLDAP, resultado);
+    } else {
+      // Crear nuevo usuario
+      await this.crearNuevoUsuarioUnificado(empleado, roles, usuarioLDAP, resultado);
+    }
+  }
+
+  /**
+   * Buscar usuario LDAP correspondiente al empleado SAP
+   */
+  private buscarUsuarioLDAP(empleado: EmpleadoSAP, usuariosLDAP: LDAPUserInfo[]): LDAPUserInfo | null {
+    const nombreCompletoSAP = empleado.nombreCompletoSap.toLowerCase();
+    
+    // Buscar por nombre completo exacto
+    let usuarioLDAP = usuariosLDAP.find(u => 
+      `${u.nombre} ${u.apellido}`.toLowerCase() === nombreCompletoSAP
+    );
+
+    if (usuarioLDAP) {
+      this.logger.debug(`🔍 Match exacto LDAP encontrado: ${usuarioLDAP.username} para ${empleado.nombreCompletoSap}`);
+      return usuarioLDAP;
+    }
+
+    // Buscar por nombre o apellido parcial
+    const [nombreSAP, ...apellidosSAP] = empleado.nombreCompletoSap.split(' ');
+    const apellidoSAP = apellidosSAP.join(' ');
+
+    usuarioLDAP = usuariosLDAP.find(u => 
+      u.nombre.toLowerCase() === nombreSAP.toLowerCase() &&
+      u.apellido.toLowerCase().includes(apellidoSAP.toLowerCase())
+    );
+
+    if (usuarioLDAP) {
+      this.logger.debug(`🔍 Match parcial LDAP encontrado: ${usuarioLDAP.username} para ${empleado.nombreCompletoSap}`);
+      return usuarioLDAP;
+    }
+
+    // Buscar por similitud de nombre
+    for (const usuario of usuariosLDAP) {
+      const nombreLDAP = `${usuario.nombre} ${usuario.apellido}`.toLowerCase();
+      const similitud = this.calcularSimilitud(nombreCompletoSAP, nombreLDAP);
+      
+      if (similitud > 80) { // Umbral de similitud
+        this.logger.debug(`🔍 Match por similitud LDAP encontrado: ${usuario.username} (${similitud}%) para ${empleado.nombreCompletoSap}`);
+        return usuario;
+      }
+    }
+
+    this.logger.debug(`❌ No se encontró usuario LDAP para: ${empleado.nombreCompletoSap}`);
+    return null;
+  }
+
+  /**
+   * Calcular similitud entre dos strings
+   */
+  private calcularSimilitud(str1: string, str2: string): number {
+    const longer = str1.length > str2.length ? str1 : str2;
+    const shorter = str1.length > str2.length ? str2 : str1;
+    
+    if (longer.length === 0) return 100;
+    
+    const distance = this.levenshteinDistance(longer, shorter);
+    return (longer.length - distance) / longer.length * 100;
+  }
+
+  /**
+   * Calcular distancia de Levenshtein
+   */
+  private levenshteinDistance(str1: string, str2: string): number {
+    const matrix = [];
+    
+    for (let i = 0; i <= str2.length; i++) {
+      matrix[i] = [i];
+    }
+    
+    for (let j = 0; j <= str1.length; j++) {
+      matrix[0][j] = j;
+    }
+    
+    for (let i = 1; i <= str2.length; i++) {
+      for (let j = 1; j <= str1.length; j++) {
+        if (str2.charAt(i - 1) === str1.charAt(j - 1)) {
+          matrix[i][j] = matrix[i - 1][j - 1];
+        } else {
+          matrix[i][j] = Math.min(
+            matrix[i - 1][j - 1] + 1,
+            matrix[i][j - 1] + 1,
+            matrix[i - 1][j] + 1
+          );
+        }
+      }
+    }
+    
+    return matrix[str2.length][str1.length];
+  }
+
+  /**
+   * Actualizar usuario existente con información LDAP
+   */
+  private async actualizarUsuarioExistenteConLDAP(
+    empleado: EmpleadoSAP,
+    usuarioExistente: UsuarioHANA,
+    usuarioLDAP: LDAPUserInfo | null,
+    resultado: SyncResult
+  ): Promise<void> {
+    const datosActualizacion: any = {
+      nombre: empleado.nombreCompletoSap.split(' ')[0] || empleado.nombreCompletoSap,
+      apellido: empleado.nombreCompletoSap.split(' ').slice(1).join(' ') || '',
+      nombreCompletoSap: empleado.nombreCompletoSap,
+      activo: empleado.activo,
+      ultimaSincronizacion: new Date(),
+    };
+
+    // Agregar información adicional si está disponible
+    if (empleado.cargo) datosActualizacion.cargo = empleado.cargo;
+    if (empleado.area) datosActualizacion.area = empleado.area;
+    if (empleado.sede) datosActualizacion.sede = empleado.sede;
+    if (empleado.jefeDirecto) datosActualizacion.jefeDirectoSapId = empleado.jefeDirecto;
+
+    // Si se encontró usuario LDAP, actualizar con información LDAP
+    if (usuarioLDAP) {
+      datosActualizacion.username = usuarioLDAP.username;
+      datosActualizacion.email = usuarioLDAP.email;
+      datosActualizacion.autenticacion = 'LDAP';
+      
+      // Mapear grupos LDAP a rol
+      const mapeoRol = this.mapearGruposLDAPaRol(usuarioLDAP.groups);
+      if (mapeoRol.rolId) {
+        datosActualizacion.rolId = mapeoRol.rolId;
+      }
+      
+      this.logger.debug(`🔄 Usuario actualizado con LDAP: ${usuarioLDAP.username} (${empleado.nombreCompletoSap})`);
+    } else {
+      // Si no se encontró en LDAP, mantener autenticación local
+      datosActualizacion.autenticacion = 'LOCAL';
+      this.logger.debug(`🔄 Usuario actualizado sin LDAP: ${empleado.nombreCompletoSap}`);
+    }
+
+    try {
+      await this.sapHanaService.actualizarUsuario(usuarioExistente.id, datosActualizacion);
+      resultado.data!.usuariosActualizados++;
+    } catch (error) {
+      throw new Error(`Error actualizando usuario ${empleado.empID}: ${error.message}`);
+    }
+  }
+
+  /**
+   * Crear nuevo usuario con información LDAP
+   */
+  private async crearNuevoUsuarioConLDAP(
+    empleado: EmpleadoSAP,
+    roles: any[],
+    usuarioLDAP: LDAPUserInfo | null,
+    resultado: SyncResult
+  ): Promise<void> {
+    // Obtener rol por defecto (ID = 3)
+    const rolPorDefecto = await this.sapHanaService.obtenerRolPorId(3);
+    
+    if (!rolPorDefecto) {
+      throw new Error('No se encontró el rol por defecto con ID = 3');
+    }
+
+    const datosUsuario: any = {
+      empID: empleado.empID,
+      nombre: empleado.nombreCompletoSap.split(' ')[0] || empleado.nombreCompletoSap,
+      apellido: empleado.nombreCompletoSap.split(' ').slice(1).join(' ') || '',
+      nombreCompletoSap: empleado.nombreCompletoSap,
+      activo: empleado.activo,
+      ROLID: rolPorDefecto.id, // Usar ROLID para mantener consistencia
+      ultimaSincronizacion: new Date(),
+    };
+
+    // Agregar información adicional si está disponible
+    if (empleado.cargo) datosUsuario.cargo = empleado.cargo;
+    if (empleado.area) datosUsuario.area = empleado.area;
+    if (empleado.sede) datosUsuario.sede = empleado.sede;
+    if (empleado.jefeDirecto) datosUsuario.jefeDirectoSapId = empleado.jefeDirecto;
+
+    // Si se encontró usuario LDAP, usar información LDAP
+    if (usuarioLDAP) {
+      datosUsuario.username = usuarioLDAP.username;
+      datosUsuario.email = usuarioLDAP.email;
+      datosUsuario.autenticacion = 'LDAP';
+      
+      // Mapear grupos LDAP a rol
+      const mapeoRol = this.mapearGruposLDAPaRol(usuarioLDAP.groups);
+      if (mapeoRol.rolId) {
+        datosUsuario.rolId = mapeoRol.rolId;
+      }
+      
+      this.logger.log(`👤 Nuevo usuario creado con LDAP: ${usuarioLDAP.username} (${empleado.nombreCompletoSap})`);
+    } else {
+      // Si no se encontró en LDAP, generar username y usar autenticación local
+      datosUsuario.username = this.generarUsername(empleado);
+      datosUsuario.email = this.generarEmail(empleado);
+      datosUsuario.autenticacion = 'LOCAL';
+      
+      this.logger.log(`👤 Nuevo usuario creado sin LDAP: ${datosUsuario.username} (${empleado.nombreCompletoSap})`);
+    }
+
+    try {
+      await this.sapHanaService.crearUsuario(datosUsuario);
+      resultado.data!.usuariosCreados++;
+    } catch (error) {
+      throw new Error(`Error creando usuario ${empleado.empID}: ${error.message}`);
+    }
+  }
+
+  /**
+   * Mapear grupos LDAP a roles del sistema
+   */
+  private mapearGruposLDAPaRol(groups: string[]): { rolId?: number; rolNombre: string } {
+    // Mapeo de grupos LDAP a roles locales
+    const groupMappings: { [key: string]: string } = {
+      'Domain Admins': 'Administrador',
+      'Administradores': 'Administrador',
+      'Gerentes': 'Gerente',
+      'Ventas': 'Usuario',
+      'RRHH': 'Usuario',
+      'Contabilidad': 'Usuario',
+      'IT': 'Usuario',
+    };
+
+    // Buscar el grupo con mayor privilegio
+    for (const group of groups) {
+      if (groupMappings[group]) {
+        this.logger.debug(`🔍 Grupo ${group} mapeado a rol: ${groupMappings[group]}`);
+        return { rolNombre: groupMappings[group] };
+      }
+    }
+
+    // Rol por defecto para usuarios sin grupos específicos
+    this.logger.debug(`🔍 Usuario sin grupos reconocidos, asignando rol por defecto`);
+    return { rolNombre: 'Usuario' };
+  }
+
+  /**
+   * Actualizar usuario existente con estructura simplificada
+   */
+  private async actualizarUsuarioExistenteUnificado(
+    empleado: EmpleadoSAP,
+    usuarioExistente: UsuarioHANA,
+    usuarioLDAP: LDAPUserInfo | null,
+    resultado: SyncResult
+  ): Promise<void> {
+    const datosActualizacion: any = {
+      nombre: empleado.nombreCompletoSap.split(' ')[0] || empleado.nombreCompletoSap,
+      apellido: empleado.nombreCompletoSap.split(' ').slice(1).join(' ') || '',
+      nombreCompletoSap: empleado.nombreCompletoSap,
+      activo: empleado.activo,
+      ultimaSincronizacion: new Date(),
+    };
+
+    // Agregar información adicional si está disponible (solo campos que existen en la tabla)
+    if (empleado.jefeDirecto && typeof empleado.jefeDirecto === 'number') {
+      datosActualizacion.jefeDirectoSapId = empleado.jefeDirecto;
+    }
+
+    // Si se encontró usuario LDAP, actualizar con información LDAP REAL
+    if (usuarioLDAP) {
+      datosActualizacion.username = usuarioLDAP.username;
+      datosActualizacion.email = usuarioLDAP.email; // Email REAL de LDAP
+      datosActualizacion.autenticacion = 'LDAP';
+      
+      // Mapear grupos LDAP a rol
+      const mapeoRol = this.mapearGruposLDAPaRol(usuarioLDAP.groups);
+      if (mapeoRol.rolId) {
+        datosActualizacion.rolId = mapeoRol.rolId;
+      }
+      
+      this.logger.log(`🔄 Usuario actualizado con LDAP: ${usuarioLDAP.username} (${empleado.nombreCompletoSap}) - Email: ${usuarioLDAP.email}`);
+    } else {
+      // Si no se encontró en LDAP, mantener autenticación local
+      datosActualizacion.autenticacion = 'LOCAL';
+      this.logger.log(`🔄 Usuario actualizado sin LDAP: ${empleado.nombreCompletoSap}`);
+    }
+
+    try {
+      await this.sapHanaService.actualizarUsuario(usuarioExistente.id, datosActualizacion);
+      resultado.data!.usuariosActualizados++;
+    } catch (error) {
+      throw new Error(`Error actualizando usuario ${empleado.empID}: ${error.message}`);
+    }
+  }
+
+  /**
+   * Crear nuevo usuario con estructura simplificada
+   */
+  private async crearNuevoUsuarioUnificado(
+    empleado: EmpleadoSAP,
+    roles: any[],
+    usuarioLDAP: LDAPUserInfo | null,
+    resultado: SyncResult
+  ): Promise<void> {
+    // Obtener rol por defecto (ID = 3)
+    const rolPorDefecto = await this.sapHanaService.obtenerRolPorId(3);
+    
+    if (!rolPorDefecto) {
+      throw new Error('No se encontró el rol por defecto con ID = 3');
+    }
+
+    const datosUsuario: any = {
+      empID: empleado.empID,
+      nombre: empleado.nombreCompletoSap.split(' ')[0] || empleado.nombreCompletoSap,
+      apellido: empleado.nombreCompletoSap.split(' ').slice(1).join(' ') || '',
+      nombreCompletoSap: empleado.nombreCompletoSap,
+      activo: empleado.activo,
+      ROLID: rolPorDefecto.id, // Usar ROLID para mantener consistencia
+      ultimaSincronizacion: new Date(),
+    };
+
+    // Agregar información adicional si está disponible (solo campos que existen en la tabla)
+    if (empleado.jefeDirecto && typeof empleado.jefeDirecto === 'number') {
+      datosUsuario.jefeDirectoSapId = empleado.jefeDirecto;
+    }
+
+    // Si se encontró usuario LDAP, usar información LDAP REAL
+    if (usuarioLDAP) {
+      datosUsuario.username = usuarioLDAP.username;
+      datosUsuario.email = usuarioLDAP.email; // Email REAL de LDAP
+      datosUsuario.autenticacion = 'LDAP';
+      
+      // Mapear grupos LDAP a rol
+      const mapeoRol = this.mapearGruposLDAPaRol(usuarioLDAP.groups);
+      if (mapeoRol.rolId) {
+        datosUsuario.rolId = mapeoRol.rolId;
+      }
+      
+      this.logger.log(`👤 Nuevo usuario creado con LDAP: ${usuarioLDAP.username} (${empleado.nombreCompletoSap}) - Email: ${usuarioLDAP.email}`);
+    } else {
+      // Si no se encontró en LDAP, generar username y usar autenticación local
+      datosUsuario.username = this.generarUsername(empleado);
+      datosUsuario.email = this.generarEmail(empleado);
+      datosUsuario.autenticacion = 'LOCAL';
+      
+      this.logger.log(`👤 Nuevo usuario creado sin LDAP: ${datosUsuario.username} (${empleado.nombreCompletoSap})`);
+    }
+
+    try {
+      await this.sapHanaService.crearUsuario(datosUsuario);
+      resultado.data!.usuariosCreados++;
+    } catch (error) {
+      throw new Error(`Error creando usuario ${empleado.empID}: ${error.message}`);
+    }
+  }
+
+}

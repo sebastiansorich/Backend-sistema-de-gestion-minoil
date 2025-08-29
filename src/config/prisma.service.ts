@@ -11,31 +11,15 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
 
   async onModuleInit() {
     await this.$connect();
+    console.log('✅ Conectado exitosamente a la base de datos');
   }
 
   async onModuleDestroy() {
-    await this.$disconnect();
-  }
-
-  async cleanDatabase() {
-    if (process.env.NODE_ENV === 'production') {
-      throw new Error('Cannot clean database in production');
-    }
-    
-    const tablenames = await this.$queryRaw<
-      Array<{ tablename: string }>
-    >`SELECT tablename FROM pg_tables WHERE schemaname='public'`;
-
-    const tables = tablenames
-      .map(({ tablename }) => tablename)
-      .filter((name) => name !== '_prisma_migrations')
-      .map((name) => `"public"."${name}"`)
-      .join(', ');
-
     try {
-      await this.$executeRawUnsafe(`TRUNCATE TABLE ${tables} CASCADE;`);
+      await this.$disconnect();
+      console.log('🔌 Desconectado de la base de datos');
     } catch (error) {
-      console.log({ error });
+      console.log('🔌 Error al desconectar:', error.message);
     }
   }
 } 
