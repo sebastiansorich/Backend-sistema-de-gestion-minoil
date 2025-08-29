@@ -1,6 +1,6 @@
-# 🏢 Backend Minoil - Sistema Empresarial
+# 🏢 Minoil S.A. - BPMS v1.0.0-beta
 
-Sistema backend para gestión de usuarios, jerarquías y permisos de acceso a distintos módulos empresariales.
+Sistema empresarial para la gestión de usuarios, roles, módulos y permisos de Minoil S.A.
 
 ## 🚀 Características
 

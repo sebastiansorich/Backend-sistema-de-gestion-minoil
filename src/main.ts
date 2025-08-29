@@ -40,11 +40,11 @@ async function bootstrap() {
     }),
   );
 
-  // Configuración de Swagger simplificada
+  // Configuración de Swagger
   const config = new DocumentBuilder()
-    .setTitle('Minoil API - Sistema Simplificado')
-    .setDescription('API del sistema empresarial Minoil para gestión básica de usuarios, roles, módulos y permisos')
-    .setVersion('2.0')
+    .setTitle('Minoil S.A. - BPMS')
+    .setDescription('API del sistema empresarial Minoil para gestión de usuarios, roles, módulos y permisos')
+    .setVersion('1.0.0-beta')
     .addTag('roles', 'Gestión de roles del sistema')
     .addTag('usuarios', 'Gestión de usuarios del sistema')
     .addTag('modulos', 'Gestión de módulos del sistema')
@@ -59,7 +59,7 @@ async function bootstrap() {
   
   console.log(`🚀 Application is running on: http://localhost:${port}`);
   console.log(`📚 Swagger documentation: http://localhost:${port}/api`);
-  console.log(`✨ Sistema simplificado - Solo funcionalidades básicas`);
+  console.log(`✨ Minoil S.A. BPMS v1.0.0-beta`);
 }
 
 bootstrap();
