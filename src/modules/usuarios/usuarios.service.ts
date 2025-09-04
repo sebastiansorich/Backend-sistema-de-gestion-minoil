@@ -51,7 +51,7 @@ export class UsuariosService {
         empID: createUsuarioDto.empID,
         jefeDirectoSapId: createUsuarioDto.jefeDirectoSapId,
         nombreCompletoSap: createUsuarioDto.nombreCompletoSap,
-        ROLID: rolId, // Usar el rolId (por defecto 3 si no se especifica)
+        ROLID: rolId, // Usar el ROLID (por defecto 3 si no se especifica)
       };
 
       const usuarioCreado = await this.sapHanaService.crearUsuario(usuarioData);

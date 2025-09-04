@@ -9,7 +9,7 @@ export interface EmpleadoSAP {
   area?: string;
   sede?: string;
   jefeDirecto?: string;
-  activo: boolean;
+  activo: boolean | number | string; // Más flexible para diferentes formatos de SAP
 }
 
 export interface SocioNegocioSAP {
@@ -410,6 +410,7 @@ export class SapHanaService {
       throw error;
     }
   }
+
 
   async crearUsuario(usuario: Omit<UsuarioHANA, 'id' | 'createdAt' | 'updatedAt'>): Promise<UsuarioHANA> {
     const query = `
@@ -823,6 +824,7 @@ export class SapHanaService {
   // 🔄 MÉTODOS EXISTENTES PARA SAP
   // ============================================================================
 
+
   async obtenerEmpleadosActivos(): Promise<EmpleadoSAP[]> {
     this.logger.log('📊 Ejecutando procedimiento almacenado MINOILDES.SP_OBTENER_DATOS_COMPLETOS_MINOIL...');
     
@@ -832,13 +834,30 @@ export class SapHanaService {
       
       this.logger.log(`✅ Obtenidos ${result.length} empleados activos de SAP`);
       
+      // Debug: mostrar campos disponibles en el primer registro
+      if (result.length > 0) {
+        const camposDisponibles = Object.keys(result[0]);
+        this.logger.log(`🔍 Campos disponibles en el procedimiento: ${camposDisponibles.join(', ')}`);
+        
+        // Mostrar algunos valores de jefe para debug
+        const primerosJefes = result.slice(0, 3).map(row => ({
+          empID: row.ID_Empleado,
+          nombre: row.Nombre_Completo,
+          jefeNombre: row.Nombre_Jefe,
+          jefeID: row.ID_Jefe_Inmediato || row.ID_Jefe || row.empID_Jefe,
+          todosLosCampos: Object.keys(row).filter(key => key.toLowerCase().includes('jefe'))
+        }));
+        this.logger.log(`🔍 Debug jefes - Primeros 3: ${JSON.stringify(primerosJefes, null, 2)}`);
+      }
+      
       return result.map((row: any) => ({
         empID: row.ID_Empleado || row.empID,
         nombreCompletoSap: row.Nombre_Completo || row.nombreCompleto,
         cargo: row.Cargo || row.cargo,
         area: row.Nombre_Area || row.area,
         sede: row.Nombre_Sede || row.sede,
-        jefeDirecto: row.Nombre_Jefe || row.jefeDirecto,
+        jefeDirecto: row.ID_Jefe_Inmediato || row.ID_Jefe || row.empID_Jefe || row.jefeDirecto, // Usar ID_Jefe_Inmediato que es el empID del jefe
+        
         activo: row.Activo === 1 || row.activo === 'Y',
       }));
     } catch (error) {
@@ -976,7 +995,7 @@ export class SapHanaService {
               nombre: empleado.nombreCompletoSap.split(' ')[0] || 'Usuario',
               apellido: empleado.nombreCompletoSap.split(' ').slice(1).join(' ') || 'SAP',
               password: '', // Sin contraseña para autenticación LDAP
-              activo: empleado.activo,
+              activo: Boolean(empleado.activo),
               autenticacion: 'ldap', // Configurar para autenticación LDAP
               empID: empleado.empID,
               jefeDirectoSapId: empleado.jefeDirecto ? parseInt(empleado.jefeDirecto) || null : null,
@@ -1069,7 +1088,7 @@ export class SapHanaService {
               nombre: empleado.nombreCompletoSap.split(' ')[0] || 'Usuario',
               apellido: empleado.nombreCompletoSap.split(' ').slice(1).join(' ') || 'SAP',
               password,
-              activo: empleado.activo,
+              activo: Boolean(empleado.activo),
               autenticacion,
               empID: empleado.empID,
               jefeDirectoSapId: empleado.jefeDirecto ? parseInt(empleado.jefeDirecto) || null : null,

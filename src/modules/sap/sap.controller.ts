@@ -1,4 +1,4 @@
-import { Controller, Post, Get } from '@nestjs/common';
+import { Controller, Post, Get, Logger } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger';
 import { SapHanaService } from './sap-hana.service';
 import { SapSyncService } from './sap-sync.service';
@@ -7,6 +7,8 @@ import { LdapService } from '../auth/ldap.service';
 @ApiTags('SAP')
 @Controller('sap')
 export class SapController {
+  private readonly logger = new Logger(SapController.name);
+
   constructor(
     private readonly sapHanaService: SapHanaService,
     private readonly sapSyncService: SapSyncService,
@@ -14,14 +16,14 @@ export class SapController {
   ) {}
 
   @Post('sincronizar-usuarios')
-  @ApiOperation({ summary: 'Sincronizar usuarios con empleados de SAP' })
+  @ApiOperation({ summary: 'Sincronizar usuarios con empleados de SAP y LDAP' })
   @ApiResponse({ status: 200, description: 'Sincronización completada exitosamente' })
   @ApiResponse({ status: 500, description: 'Error en la sincronización' })
   async sincronizarUsuarios() {
     try {
-      const resultado = await this.sapSyncService.sincronizarUsuariosCompleto({
+      const resultado = await this.sapSyncService.sincronizarUsuarios({
         soloActivos: true,
-        validarLDAP: false
+        forzarSincronizacion: false
       });
       return resultado;
     } catch (error) {
@@ -33,19 +35,91 @@ export class SapController {
     }
   }
 
-  @Post('sincronizar-ldap-sap')
-  @ApiOperation({ summary: 'Sincronizar usuarios con LDAP y SAP para autenticación (estructura simplificada)' })
-  @ApiResponse({ status: 200, description: 'Sincronización completada exitosamente' })
-  @ApiResponse({ status: 500, description: 'Error en la sincronización' })
-  async sincronizarLdapSap() {
+  @Get('usuarios-ldap')
+  @ApiOperation({ summary: 'Obtener usuarios de LDAP para debugging' })
+  @ApiResponse({ status: 200, description: 'Usuarios LDAP obtenidos exitosamente' })
+  @ApiResponse({ status: 500, description: 'Error al obtener usuarios LDAP' })
+  async obtenerUsuariosLDAP() {
     try {
-      const resultado = await this.sapSyncService.sincronizarUsuariosUnificado();
-      return resultado;
+      this.logger.log('🔍 Endpoint de debug: Obteniendo usuarios LDAP...');
+      
+      const usuarios = await this.ldapService.searchAllUsers();
+      
+      return {
+        success: true,
+        message: 'Usuarios LDAP obtenidos exitosamente',
+        data: {
+          total: usuarios.length,
+          usuarios: usuarios.map(u => ({
+            username: u.username,
+            email: u.email,
+            nombre: u.nombre,
+            apellido: u.apellido,
+            displayName: u.displayName,
+            department: u.department,
+            office: u.office,
+            title: u.title,
+            groups: u.groups
+          }))
+        },
+        debug: {
+          timestamp: new Date().toISOString(),
+          endpoint: '/sap/usuarios-ldap',
+          ldapConfig: {
+            url: process.env.LDAP_URL || 'ldap://SRVDC.main.minoil.com.bo:389',
+            baseDN: process.env.LDAP_BASE_DN || 'DC=main,DC=minoil,DC=com,DC=bo'
+          }
+        }
+      };
     } catch (error) {
       return {
         success: false,
-        message: 'Error en la sincronización LDAP + SAP',
-        error: error.message
+        message: 'Error al obtener usuarios LDAP',
+        error: error.message,
+        debug: {
+          timestamp: new Date().toISOString(),
+          endpoint: '/sap/usuarios-ldap',
+          ldapConfig: {
+            url: process.env.LDAP_URL || 'ldap://SRVDC.main.minoil.com.bo:389',
+            baseDN: process.env.LDAP_BASE_DN || 'DC=main,DC=minoil,DC=com,DC=bo'
+          }
+        }
+      };
+    }
+  }
+
+  @Get('empleados-sap')
+  @ApiOperation({ summary: 'Obtener todos los empleados de SAP para debugging' })
+  @ApiResponse({ status: 200, description: 'Datos de empleados SAP obtenidos exitosamente' })
+  @ApiResponse({ status: 500, description: 'Error al obtener datos de SAP' })
+  async obtenerEmpleadosSAP() {
+    try {
+      this.logger.log('🔍 Endpoint de debug: Obteniendo datos de empleados SAP...');
+      
+      const empleados = await this.sapHanaService.obtenerEmpleadosActivos();
+      
+      return {
+        success: true,
+        message: 'Datos de empleados SAP obtenidos exitosamente',
+        data: {
+          total: empleados.length,
+          empleados: empleados
+        },
+        debug: {
+          timestamp: new Date().toISOString(),
+          endpoint: '/sap/empleados-sap',
+          camposDisponibles: empleados.length > 0 ? Object.keys(empleados[0]) : []
+        }
+      };
+    } catch (error) {
+      return {
+        success: false,
+        message: 'Error al obtener datos de SAP',
+        error: error.message,
+        debug: {
+          timestamp: new Date().toISOString(),
+          endpoint: '/sap/empleados-sap'
+        }
       };
     }
   }

@@ -74,43 +74,258 @@ export class LdapService {
   async searchAllUsers(): Promise<LDAPUserInfo[]> {
     this.logger.log('🔍 Iniciando búsqueda de usuarios LDAP...');
     
-    // Estrategia de fallback: 1. Admin -> 2. Anónima -> 3. Array vacío
-    const estrategias = [
-      { tipo: 'admin', descripcion: 'Autenticación como administrador' },
-      { tipo: 'anonymous', descripcion: 'Búsqueda anónima' },
-      { tipo: 'simple', descripcion: 'Búsqueda simple sin filtros avanzados' }
-    ];
-
-    for (const estrategia of estrategias) {
-      try {
-        this.logger.log(`🔄 Intentando estrategia: ${estrategia.descripcion}`);
-        
-        const usuarios = await this.ejecutarEstrategiaBusqueda(estrategia.tipo);
-        
-        if (usuarios.length > 0) {
-          this.logger.log(`✅ Estrategia '${estrategia.tipo}' exitosa: ${usuarios.length} usuarios encontrados`);
-          return usuarios;
-        } else {
-          this.logger.warn(`⚠️ Estrategia '${estrategia.tipo}' no encontró usuarios`);
+    try {
+      // Intentar con credenciales de usuario normal primero
+      const adminDn = process.env.LDAP_ADMIN_DN;
+      const adminPassword = process.env.LDAP_ADMIN_PASSWORD;
+      
+      if (adminDn && adminPassword) {
+        this.logger.log('🔐 Intentando búsqueda con credenciales de usuario...');
+        try {
+          const client = this.createClient(false);
+          try {
+            // Bind con usuario normal
+            await this.bindUser(client, adminDn, adminPassword);
+            this.logger.log('✅ Autenticado exitosamente con usuario LDAP');
+            
+            const usuarios = await this.searchUsersWithAuth(client);
+            this.logger.log(`✅ Búsqueda autenticada exitosa: ${usuarios.length} usuarios encontrados`);
+            return usuarios;
+          } finally {
+            this.safeUnbind(client);
+          }
+        } catch (authError) {
+          this.logger.warn(`⚠️ Autenticación falló: ${authError.message}`);
+          this.logger.log('🔄 Intentando búsqueda anónima como fallback...');
         }
-      } catch (error) {
-        this.logger.warn(`⚠️ Estrategia '${estrategia.tipo}' falló: ${error.message}`);
-        
-        // Si es un error de conexión, no intentar más estrategias
-        if (error.message.includes('ECONNRESET') || 
-            error.message.includes('ENOTFOUND') || 
-            error.message.includes('timeout')) {
-          this.logger.error(`🚫 Error de conexión LDAP detectado. Saltando LDAP y continuando sincronización...`);
-          break;
-        }
-        
-        continue;
       }
+      
+      // Fallback: intentar búsqueda anónima
+      const client = this.createClient(false);
+      try {
+        const usuarios = await this.searchUsersAnonymous(client);
+        this.logger.log(`✅ Búsqueda anónima exitosa: ${usuarios.length} usuarios encontrados`);
+          return usuarios;
+      } finally {
+        this.safeUnbind(client);
+        }
+      
+      } catch (error) {
+      this.logger.warn(`⚠️ Error en búsqueda LDAP: ${error.message}`);
+      this.logger.warn('🚫 Retornando array vacío para continuar sincronización');
+      return [];
     }
+  }
 
-    // Si todas las estrategias fallan, retornar array vacío para continuar sincronización
-    this.logger.warn('🚫 Todas las estrategias LDAP fallaron, retornando array vacío para continuar sincronización');
-    return [];
+  /**
+   * Búsqueda anónima simplificada que funcionaba antes
+   */
+  private async searchUsersAnonymous(client: ldap.Client): Promise<LDAPUserInfo[]> {
+    return new Promise((resolve, reject) => {
+      // Filtro simple que funcionaba antes
+      const filter = '(objectClass=user)';
+      
+      const searchOptions = {
+        filter,
+        scope: 'sub' as const,
+        attributes: [
+          'sAMAccountName',
+          'mail',
+          'givenName',
+          'sn',
+          'displayName',
+          'department',
+          'physicalDeliveryOfficeName',
+          'title',
+          'memberOf'
+        ],
+        timeLimit: 30, // 30 segundos
+        sizeLimit: 2000, // Más usuarios
+      };
+
+      const users: LDAPUserInfo[] = [];
+      let hasError = false;
+
+      // Timeout para la búsqueda
+      const searchTimeout = setTimeout(() => {
+        if (!hasError) {
+          hasError = true;
+          this.logger.error('⏰ Timeout en búsqueda LDAP anónima');
+          reject(new Error('Timeout en búsqueda LDAP'));
+        }
+      }, 30000);
+
+      try {
+        client.search(this.baseDN, searchOptions, (err, res) => {
+          if (err) {
+            clearTimeout(searchTimeout);
+            if (!hasError) {
+              hasError = true;
+              this.logger.error('❌ Error en búsqueda LDAP anónima:', err.message);
+              reject(new Error(`Error en búsqueda LDAP: ${err.message}`));
+            }
+            return;
+          }
+
+          res.on('searchEntry', (entry) => {
+            try {
+              const attributes = entry.pojo?.attributes || [];
+              
+              const userInfo: LDAPUserInfo = {
+                username: this.getStringValue(attributes, 'sAMAccountName'),
+                email: this.getStringValue(attributes, 'mail') || '',
+                nombre: this.getStringValue(attributes, 'givenName') || '',
+                apellido: this.getStringValue(attributes, 'sn') || '',
+                displayName: this.getStringValue(attributes, 'displayName') || '',
+                department: this.getStringValue(attributes, 'department') || '',
+                office: this.getStringValue(attributes, 'physicalDeliveryOfficeName') || '',
+                title: this.getStringValue(attributes, 'title') || '',
+                groups: this.extractGroups(attributes),
+              };
+
+              // Solo incluir usuarios con username válido
+              if (userInfo.username && userInfo.username.trim()) {
+                // Generar email si no existe
+                if (!userInfo.email) {
+                  userInfo.email = `${userInfo.username}@minoil.com.bo`;
+                }
+                users.push(userInfo);
+              }
+            } catch (entryError) {
+              this.logger.warn(`⚠️ Error procesando entrada LDAP: ${entryError.message}`);
+            }
+          });
+
+          res.on('error', (err) => {
+            clearTimeout(searchTimeout);
+            if (!hasError) {
+              hasError = true;
+              this.logger.error('❌ Error en stream de búsqueda LDAP (anonymous):', err.message);
+              reject(new Error(`Error en stream de búsqueda LDAP: ${err.message}`));
+            }
+          });
+
+          res.on('end', () => {
+            clearTimeout(searchTimeout);
+            if (!hasError) {
+              this.logger.log(`📊 Búsqueda LDAP completada: ${users.length} usuarios encontrados`);
+              resolve(users);
+            }
+          });
+        });
+      } catch (error) {
+        clearTimeout(searchTimeout);
+        if (!hasError) {
+          hasError = true;
+          reject(error);
+        }
+      }
+    });
+  }
+
+  /**
+   * Búsqueda con usuario autenticado
+   */
+  private async searchUsersWithAuth(client: ldap.Client): Promise<LDAPUserInfo[]> {
+    return new Promise((resolve, reject) => {
+      // Filtro más permisivo para usuario autenticado
+      const filter = '(&(objectClass=user)(objectCategory=person))';
+      
+      const searchOptions = {
+        filter,
+        scope: 'sub' as const,
+        attributes: [
+          'sAMAccountName',
+          'mail',
+          'givenName',
+          'sn',
+          'displayName',
+          'department',
+          'physicalDeliveryOfficeName',
+          'title',
+          'memberOf'
+        ],
+        timeLimit: 30,
+        sizeLimit: 2000,
+      };
+
+      const users: LDAPUserInfo[] = [];
+      let hasError = false;
+
+      const searchTimeout = setTimeout(() => {
+        if (!hasError) {
+          hasError = true;
+          this.logger.error('⏰ Timeout en búsqueda LDAP autenticada');
+          reject(new Error('Timeout en búsqueda LDAP'));
+        }
+      }, 30000);
+
+      try {
+        client.search(this.baseDN, searchOptions, (err, res) => {
+          if (err) {
+            clearTimeout(searchTimeout);
+            if (!hasError) {
+              hasError = true;
+              this.logger.error('❌ Error en búsqueda LDAP autenticada:', err.message);
+              reject(new Error(`Error en búsqueda LDAP: ${err.message}`));
+            }
+            return;
+          }
+
+          res.on('searchEntry', (entry) => {
+            try {
+              const attributes = entry.pojo?.attributes || [];
+              
+              const userInfo: LDAPUserInfo = {
+                username: this.getStringValue(attributes, 'sAMAccountName'),
+                email: this.getStringValue(attributes, 'mail') || '',
+                nombre: this.getStringValue(attributes, 'givenName') || '',
+                apellido: this.getStringValue(attributes, 'sn') || '',
+                displayName: this.getStringValue(attributes, 'displayName') || '',
+                department: this.getStringValue(attributes, 'department') || '',
+                office: this.getStringValue(attributes, 'physicalDeliveryOfficeName') || '',
+                title: this.getStringValue(attributes, 'title') || '',
+                groups: this.extractGroups(attributes),
+              };
+
+              // Solo incluir usuarios con username válido
+              if (userInfo.username && userInfo.username.trim()) {
+                // Generar email si no existe
+                if (!userInfo.email) {
+                  userInfo.email = `${userInfo.username}@minoil.com.bo`;
+                }
+                users.push(userInfo);
+              }
+            } catch (entryError) {
+              this.logger.warn(`⚠️ Error procesando entrada LDAP: ${entryError.message}`);
+            }
+          });
+
+          res.on('error', (err) => {
+            clearTimeout(searchTimeout);
+            if (!hasError) {
+              hasError = true;
+              this.logger.error('❌ Error en stream de búsqueda LDAP autenticada:', err.message);
+              reject(new Error(`Error en stream de búsqueda LDAP: ${err.message}`));
+            }
+          });
+
+          res.on('end', () => {
+            clearTimeout(searchTimeout);
+            if (!hasError) {
+              this.logger.log(`📊 Búsqueda LDAP autenticada completada: ${users.length} usuarios encontrados`);
+              resolve(users);
+            }
+          });
+        });
+      } catch (error) {
+        clearTimeout(searchTimeout);
+        if (!hasError) {
+          hasError = true;
+          reject(error);
+        }
+      }
+    });
   }
 
   /**
