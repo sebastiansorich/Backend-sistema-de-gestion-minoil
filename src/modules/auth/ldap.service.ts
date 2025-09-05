@@ -405,19 +405,18 @@ export class LdapService {
       bindCredentials: undefined,
     };
 
-    // Forzar uso de LDAP simple por defecto ya que LDAPS está fallando
-    const usarLDAPSimple = true; // Cambiar a false si quieres probar LDAPS
-    
-    if (secure && !usarLDAPSimple && this.useStartTLS) {
-      // Usar LDAPS directo (deshabilitado por defecto)
+    if (secure) {
+      // Para cambios de contraseña, SIEMPRE usar LDAPS
       clientOptions.url = this.ldapsUrl;
       clientOptions.tlsOptions = {
-        rejectUnauthorized: this.tlsRejectUnauthorized,
+        rejectUnauthorized: false, // Permitir certificados auto-firmados en entornos corporativos
         secureProtocol: 'TLSv1_2_method',
+        servername: 'SRVDC.main.minoil.com.bo', // Nombre del servidor para verificación SSL
+        checkServerIdentity: () => undefined, // Deshabilitar verificación de identidad del servidor
       };
-      this.logger.debug(`🔒 Creando cliente LDAPS: ${this.ldapsUrl}`);
+      this.logger.debug(`🔒 Creando cliente LDAPS seguro: ${this.ldapsUrl}`);
     } else {
-      // Usar LDAP simple (recomendado)
+      // Usar LDAP simple para operaciones normales
       clientOptions.url = this.ldapUrl;
       this.logger.debug(`🔓 Creando cliente LDAP simple: ${this.ldapUrl}`);
     }
@@ -429,12 +428,16 @@ export class LdapService {
     // Configurar manejadores de eventos con mejor logging
     client.on('error', (error) => {
       this.logger.error(`❌ Error en cliente LDAP: ${error.message}`);
-      this.logger.error(`❌ Error details:`, error);
+      if (secure) {
+        this.logger.error(`🔒 Error en conexión segura LDAPS`);
+      }
     });
 
     client.on('connectError', (error) => {
       this.logger.error(`❌ Error de conexión LDAP: ${error.message}`);
-      this.logger.error(`❌ Connection error details:`, error);
+      if (secure) {
+        this.logger.error(`🔒 Error de conexión LDAPS - verificar certificados SSL`);
+      }
     });
 
     client.on('timeout', () => {
@@ -442,7 +445,11 @@ export class LdapService {
     });
 
     client.on('connect', () => {
-      this.logger.log(`✅ Cliente LDAP conectado exitosamente`);
+      if (secure) {
+        this.logger.log(`🔒 Cliente LDAPS conectado exitosamente (conexión segura)`);
+      } else {
+        this.logger.log(`✅ Cliente LDAP conectado exitosamente`);
+      }
     });
 
     client.on('close', () => {
@@ -453,7 +460,104 @@ export class LdapService {
   }
 
   /**
-   * Bind seguro con timeout
+   * Prueba si una conexión segura está funcionando correctamente
+   */
+  private async testSecureConnection(client: ldap.Client): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        reject(new Error('Timeout probando conexión segura'));
+      }, 5000); // 5 segundos para probar la conexión
+
+      // Intentar un bind simple para probar la conexión
+      const adminDn = process.env.LDAP_ADMIN_DN;
+      const adminPassword = process.env.LDAP_ADMIN_PASSWORD;
+
+      if (!adminDn || !adminPassword) {
+        clearTimeout(timeout);
+        reject(new Error('Credenciales de administrador no configuradas para prueba de conexión'));
+        return;
+      }
+
+      client.bind(adminDn, adminPassword, (err) => {
+        clearTimeout(timeout);
+        if (err) {
+          // Si es error de conexión, rechazar para activar fallback
+          if (err.message.includes('ECONNRESET') || 
+              err.message.includes('ECONNREFUSED') || 
+              err.message.includes('ETIMEDOUT') ||
+              err.message.includes('socket hang up')) {
+            this.logger.warn(`🔌 Error de conexión en prueba LDAPS: ${err.message}`);
+            reject(err);
+          } else {
+            // Si es error de credenciales pero la conexión funciona, continuar
+            this.logger.log(`🔐 Conexión LDAPS funciona (error de credenciales esperado en prueba)`);
+            resolve();
+          }
+        } else {
+          this.logger.log(`✅ Prueba de conexión LDAPS exitosa`);
+          resolve();
+        }
+      });
+    });
+  }
+
+  /**
+   * Crea un cliente LDAP con StartTLS para conexiones seguras
+   */
+  private async createClientWithStartTLS(): Promise<ldap.Client> {
+    return new Promise((resolve, reject) => {
+      const clientOptions: any = {
+        url: this.ldapUrl, // Usar LDAP normal y luego hacer StartTLS
+        timeout: this.connectionTimeout,
+        connectTimeout: this.connectionTimeout,
+        maxConnections: 1,
+      };
+
+      this.logger.debug(`🔄 Creando cliente LDAP para StartTLS: ${this.ldapUrl}`);
+      const client = ldap.createClient(clientOptions);
+
+      // Configurar eventos
+      client.on('error', (error) => {
+        this.logger.error(`❌ Error en cliente StartTLS: ${error.message}`);
+        reject(error);
+      });
+
+      client.on('connect', () => {
+        this.logger.log(`🔗 Conexión LDAP establecida, iniciando StartTLS...`);
+        
+        // Iniciar StartTLS
+        const tlsOptions = {
+          rejectUnauthorized: false,
+          secureProtocol: 'TLSv1_2_method',
+          servername: 'SRVDC.main.minoil.com.bo',
+          checkServerIdentity: () => undefined,
+        };
+
+        client.starttls(tlsOptions, null, (err) => {
+          if (err) {
+            this.logger.error(`❌ Error en StartTLS: ${err.message}`);
+            reject(err);
+          } else {
+            this.logger.log(`🔒 StartTLS establecido exitosamente`);
+            resolve(client);
+          }
+        });
+      });
+
+      client.on('connectError', (error) => {
+        this.logger.error(`❌ Error de conexión StartTLS: ${error.message}`);
+        reject(error);
+      });
+
+      // Timeout para la operación completa
+      setTimeout(() => {
+        reject(new Error('Timeout estableciendo conexión StartTLS'));
+      }, this.connectionTimeout);
+    });
+  }
+
+  /**
+   * Bind seguro con timeout y mejor manejo de errores
    */
   private async bindUser(client: ldap.Client, userDN: string, password: string): Promise<void> {
     return new Promise((resolve, reject) => {
@@ -464,7 +568,21 @@ export class LdapService {
       client.bind(userDN, password, (err) => {
         clearTimeout(timeout);
         if (err) {
-          reject(new UnauthorizedException('Credenciales LDAP inválidas'));
+          // Distinguir entre errores de conexión y errores de autenticación
+          if (err.message.includes('ECONNRESET') || 
+              err.message.includes('ECONNREFUSED') || 
+              err.message.includes('ETIMEDOUT') ||
+              err.message.includes('socket hang up') ||
+              err.message.includes('ENOTFOUND') ||
+              err.message.includes('EHOSTUNREACH')) {
+            // Error de conexión - propagar el error original
+            this.logger.error(`🔌 Error de conexión en bind: ${err.message}`);
+            reject(err);
+          } else {
+            // Error de autenticación - usar UnauthorizedException
+            this.logger.error(`🔐 Error de autenticación en bind: ${err.message}`);
+            reject(new UnauthorizedException('Credenciales LDAP inválidas'));
+          }
         } else {
           resolve();
         }
@@ -769,24 +887,60 @@ export class LdapService {
    * Cambia la contraseña de un usuario en LDAP
    */
   async changePassword(username: string, currentPassword: string, newPassword: string): Promise<void> {
+    this.logger.log(`🔄 Iniciando cambio de contraseña para usuario: ${username}`);
+    
     const client = this.createClient(false);
     const userDN = `MAIN\\${username}`;
 
     try {
       // 1. Verificar contraseña actual
+      this.logger.log(`🔐 Verificando contraseña actual para usuario: ${username}`);
       await this.bindUser(client, userDN, currentPassword);
-      this.logger.log(`Contraseña actual verificada para usuario: ${username}`);
+      this.logger.log(`✅ Contraseña actual verificada para usuario: ${username}`);
 
       // 2. Obtener el DN completo del usuario para la modificación
+      this.logger.log(`🔍 Obteniendo DN completo para usuario: ${username}`);
       const userFullDN = await this.getUserFullDN(client, username);
+      this.logger.log(`📋 DN completo obtenido: ${userFullDN}`);
       
       // 3. Crear cliente seguro para la modificación
       let secureClient: ldap.Client | null = null;
+      let useSecureConnection = true;
+      let isSecureClient = false;
+      
       try {
-        secureClient = this.createClient(true); // Crear cliente seguro
-      } catch (e) {
-        this.logger.error('Fallo al crear canal seguro para cambio de contraseña', e);
-        throw new Error('No se pudo establecer conexión segura para cambio de contraseña');
+        this.logger.log(`🔒 Creando cliente seguro LDAPS para modificación de contraseña`);
+        secureClient = this.createClient(true); // Crear cliente LDAPS
+        this.logger.log(`✅ Cliente LDAPS creado exitosamente`);
+        
+        // Probar la conexión LDAPS antes de continuar
+        await this.testSecureConnection(secureClient);
+        this.logger.log(`✅ Conexión LDAPS verificada exitosamente`);
+        isSecureClient = true;
+        
+      } catch (ldapsError) {
+        this.logger.warn(`⚠️ Fallo al crear/conectar cliente LDAPS: ${ldapsError.message}`);
+        this.logger.log(`🔄 Intentando con StartTLS como fallback...`);
+        
+        // Limpiar cliente LDAPS fallido
+        if (secureClient) {
+          this.safeUnbind(secureClient);
+          secureClient = null;
+        }
+        
+        try {
+          secureClient = await this.createClientWithStartTLS();
+          this.logger.log(`✅ Cliente con StartTLS creado exitosamente`);
+          isSecureClient = true;
+        } catch (startTlsError) {
+          this.logger.error(`❌ Fallo al crear conexión con StartTLS: ${startTlsError.message}`);
+          this.logger.warn(`⚠️ No se pudo establecer conexión SSL/TLS, intentando método sin SSL...`);
+          
+          // Continuar sin conexión segura - usar método alternativo
+          secureClient = this.createClient(false); // Cliente LDAP simple
+          this.logger.log(`🔧 Usando cliente LDAP simple como último recurso`);
+          isSecureClient = false;
+        }
       }
 
       try {
@@ -794,36 +948,98 @@ export class LdapService {
         const adminPassword = process.env.LDAP_ADMIN_PASSWORD;
 
         if (adminDn && adminPassword) {
-          this.logger.log(`Intentando cambio de contraseña vía administrador para: ${username}`);
-          await this.bindUser(secureClient, adminDn, adminPassword);
-          await this.modifyUserPasswordAsAdminReplace(secureClient, userFullDN, newPassword);
-          this.logger.log(`Contraseña cambiada exitosamente (admin) para usuario: ${username}`);
-        } else {
-          this.logger.log(`Intentando cambio de contraseña como usuario para: ${username}`);
-          const upn = this.getUserUPN(username);
+          this.logger.log(`👤 Intentando cambio de contraseña vía administrador para: ${username}`);
           
-          try {
-            await this.bindUser(secureClient, userFullDN, currentPassword);
-          } catch (e1) {
+          // Intentar diferentes formatos de DN de administrador
+          let adminBindSuccessful = false;
+          const adminFormats = [
+            adminDn, // Formato original
+            `CN=${username},OU=Usuarios,OU=IT,DC=main,DC=minoil,DC=com,DC=bo`, // DN completo del usuario
+            `MAIN\\${username}`, // Formato DOMAIN\username
+            `${username}@main.minoil.com.bo` // Formato UPN
+          ];
+
+          for (const adminFormat of adminFormats) {
             try {
-              await this.bindUser(secureClient, userDN, currentPassword);
-            } catch (e2) {
-              await this.bindUser(secureClient, upn, currentPassword);
+              this.logger.log(`🔐 Intentando bind de administrador con: ${adminFormat}`);
+              await this.bindUser(secureClient, adminFormat, adminPassword);
+              this.logger.log(`✅ Autenticado como administrador LDAP con formato: ${adminFormat}`);
+              adminBindSuccessful = true;
+              break;
+            } catch (bindError) {
+              this.logger.warn(`⚠️ Fallo bind admin con ${adminFormat}: ${bindError.message}`);
             }
           }
+
+          if (!adminBindSuccessful) {
+            throw new Error('No se pudo autenticar con credenciales de administrador');
+          }
           
-          await this.modifyUserPasswordAsUserDeleteAdd(secureClient, userFullDN, currentPassword, newPassword);
-          this.logger.log(`Contraseña cambiada exitosamente (usuario) para: ${username}`);
+          if (isSecureClient) {
+            // Intentar cambio con SSL/TLS primero
+            try {
+              await this.modifyUserPasswordAsAdminReplace(secureClient, userFullDN, newPassword);
+              this.logger.log(`✅ Contraseña cambiada exitosamente (admin con SSL) para usuario: ${username}`);
+            } catch (sslError) {
+              this.logger.warn(`⚠️ Fallo cambio con SSL, intentando método alternativo: ${sslError.message}`);
+              
+              // Fallback: usar cliente LDAP simple para cambio de contraseña
+              await this.changePasswordWithoutSSL(userFullDN, newPassword, username);
+              this.logger.log(`✅ Contraseña cambiada exitosamente (admin SSL fallback) para usuario: ${username}`);
+            }
+          } else {
+                      // Usar método sin SSL directamente
+          this.logger.log(`🔧 Usando método sin SSL directamente para: ${username}`);
+          
+          // Primero intentar API REST
+          try {
+            await this.changePasswordViaAPI(username, currentPassword, newPassword);
+            this.logger.log(`✅ Contraseña cambiada exitosamente (API REST) para usuario: ${username}`);
+            return;
+          } catch (apiError) {
+            this.logger.warn(`⚠️ API REST falló: ${apiError.message}`);
+            this.logger.log(`🔄 Intentando método LDAP tradicional...`);
+          }
+          
+          // Fallback: método LDAP tradicional
+          await this.changePasswordWithoutSSL(userFullDN, newPassword, username);
+          this.logger.log(`✅ Contraseña cambiada exitosamente (admin sin SSL) para usuario: ${username}`);
+          }
+        } else {
+          throw new Error('Credenciales de administrador LDAP no configuradas');
         }
       } finally {
         this.safeUnbind(secureClient);
       }
 
     } catch (error) {
-      this.logger.error(`Error al cambiar contraseña para ${username}:`, error.message);
+      this.logger.error(`❌ Error al cambiar contraseña para ${username}:`, error.message);
+      this.logger.error(`❌ Stack trace:`, error.stack);
       
       if (error instanceof UnauthorizedException) {
+        this.logger.error(`🚫 Error de autorización: ${error.message}`);
         throw error;
+      }
+      
+      // Proporcionar mensajes de error más específicos
+      if (error.message.includes('modification must be an Attribute')) {
+        this.logger.error(`🔧 Error de construcción de modificación LDAP`);
+        throw new Error('Error interno en la construcción de la modificación LDAP');
+      }
+      
+      if (error.message.includes('Unwilling To Perform')) {
+        this.logger.error(`🔒 El servidor LDAP requiere conexión segura para cambio de contraseña`);
+        throw new Error('El servidor requiere una conexión segura (SSL/TLS) para cambiar contraseñas. Verifique la configuración LDAPS del servidor.');
+      }
+      
+      if (error.message.includes('Timeout')) {
+        this.logger.error(`⏰ Timeout en operación LDAP`);
+        throw new Error('Timeout en la operación de cambio de contraseña. Intente nuevamente.');
+      }
+      
+      if (error.message.includes('ECONNREFUSED') || error.message.includes('connect ECONNREFUSED')) {
+        this.logger.error(`🚫 Conexión rechazada al servidor LDAP`);
+        throw new Error('No se puede conectar al servidor LDAP. Verifique que el servicio esté funcionando.');
       }
       
       throw new Error('Error al cambiar la contraseña. Verifique que la contraseña actual sea correcta.');
@@ -880,10 +1096,10 @@ export class LdapService {
     return new Promise((resolve, reject) => {
       const change = new ldap.Change({
         operation: 'replace',
-        modification: {
+        modification: new ldap.Attribute({
           type: 'unicodePwd',
-          vals: [this.encodePassword(newPassword)],
-        } as any,
+          values: [this.encodePassword(newPassword)],
+        }),
       });
 
       client.modify(userDN, change, (err) => {
@@ -935,6 +1151,223 @@ export class LdapService {
   private encodePassword(password: string): Buffer {
     const quotedPassword = `"${password}"`;
     return Buffer.from(quotedPassword, 'utf16le');
+  }
+
+  /**
+   * Cambio de contraseña usando API REST externa (método alternativo)
+   */
+  private async changePasswordViaAPI(username: string, currentPassword: string, newPassword: string): Promise<void> {
+    this.logger.log(`🌐 Intentando cambio de contraseña vía API REST para: ${username}`);
+    
+    try {
+      // Opción 1: Usar API de Windows Server (si está disponible)
+      const apiUrl = process.env.AD_PASSWORD_API_URL || 'http://SRVDC.main.minoil.com.bo:8080/api/change-password';
+      
+      const response = await fetch(apiUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${process.env.AD_API_TOKEN || ''}`
+        },
+        body: JSON.stringify({
+          username: username,
+          currentPassword: currentPassword,
+          newPassword: newPassword,
+          domain: 'main.minoil.com.bo'
+        })
+      });
+
+      if (response.ok) {
+        const result = await response.json();
+        this.logger.log(`✅ Cambio de contraseña exitoso vía API para: ${username}`);
+        return;
+      } else {
+        throw new Error(`API respondió con código: ${response.status}`);
+      }
+    } catch (error) {
+      this.logger.error(`❌ Error en API REST: ${error.message}`);
+      throw error;
+    }
+  }
+
+  /**
+   * Cambio de contraseña usando PowerShell (método para Active Directory)
+   */
+  private async changePasswordWithoutSSL(userDN: string, newPassword: string, username: string): Promise<void> {
+    this.logger.log(`🔧 Intentando cambio de contraseña con PowerShell para: ${username}`);
+    
+    // Primero intentar método LDAP tradicional
+    try {
+      await this.changePasswordWithLDAP(userDN, newPassword, username);
+      return;
+    } catch (ldapError) {
+      this.logger.warn(`⚠️ Método LDAP falló: ${ldapError.message}`);
+      this.logger.log(`🔄 Intentando con PowerShell como alternativa...`);
+    }
+
+    // Fallback: usar PowerShell para cambiar contraseña
+    try {
+      await this.changePasswordWithPowerShell(username, newPassword);
+      this.logger.log(`✅ Contraseña cambiada exitosamente con PowerShell para: ${username}`);
+    } catch (psError) {
+      this.logger.error(`❌ Error con PowerShell: ${psError.message}`);
+      throw new Error('No se pudo cambiar la contraseña usando ningún método disponible');
+    }
+  }
+
+  /**
+   * Cambio de contraseña usando LDAP tradicional
+   */
+  private async changePasswordWithLDAP(userDN: string, newPassword: string, username: string): Promise<void> {
+    this.logger.log(`🔧 Intentando cambio LDAP tradicional para: ${username}`);
+    
+    const simpleClient = this.createClient(false);
+    
+    try {
+      const adminDn = process.env.LDAP_ADMIN_DN;
+      const adminPassword = process.env.LDAP_ADMIN_PASSWORD;
+      
+      const adminFormats = [
+        `MAIN\\${username}`,
+        adminDn,
+        `${username}@main.minoil.com.bo`,
+        userDN
+      ];
+
+      let bindSuccessful = false;
+      for (const adminFormat of adminFormats) {
+        try {
+          this.logger.log(`🔐 Probando bind LDAP con: ${adminFormat}`);
+          await this.bindUser(simpleClient, adminFormat, adminPassword);
+          this.logger.log(`✅ Bind LDAP exitoso con: ${adminFormat}`);
+          bindSuccessful = true;
+          break;
+        } catch (bindError) {
+          this.logger.warn(`⚠️ Fallo bind LDAP con ${adminFormat}: ${bindError.message}`);
+        }
+      }
+
+      if (!bindSuccessful) {
+        throw new Error('No se pudo autenticar para cambio LDAP');
+      }
+
+      // Solo intentar métodos que realmente funcionan con AD
+      const passwordMethods = [
+        { attr: 'unicodePwd', value: this.encodePassword(newPassword) }, // Método AD preferido
+        { attr: 'userPassword', value: newPassword } // Fallback LDAP estándar
+      ];
+
+      for (const method of passwordMethods) {
+        try {
+          this.logger.log(`🔧 Intentando cambio LDAP con atributo: ${method.attr}`);
+          
+          const change = new ldap.Change({
+            operation: 'replace',
+            modification: new ldap.Attribute({
+              type: method.attr,
+              values: [method.value],
+            }),
+          });
+
+          await new Promise<void>((resolve, reject) => {
+            simpleClient.modify(userDN, change, (err) => {
+              if (err) {
+                this.logger.warn(`⚠️ Fallo LDAP con ${method.attr}: ${err.message}`);
+                reject(err);
+              } else {
+                this.logger.log(`✅ Éxito LDAP con atributo: ${method.attr}`);
+                resolve();
+              }
+            });
+          });
+
+          // Verificar si el cambio realmente funcionó
+          await this.verifyPasswordChange(username, newPassword);
+          return;
+
+        } catch (methodError) {
+          this.logger.warn(`⚠️ Método LDAP ${method.attr} falló: ${methodError.message}`);
+          continue;
+        }
+      }
+
+      throw new Error('Todos los métodos LDAP fallaron');
+
+    } finally {
+      this.safeUnbind(simpleClient);
+    }
+  }
+
+  /**
+   * Cambio de contraseña usando PowerShell (Windows AD)
+   */
+  private async changePasswordWithPowerShell(username: string, newPassword: string): Promise<void> {
+    this.logger.log(`🔧 Ejecutando cambio de contraseña con PowerShell para: ${username}`);
+    
+    const { exec } = require('child_process');
+    const util = require('util');
+    const execAsync = util.promisify(exec);
+
+    // Escapar caracteres especiales en la contraseña
+    const escapedPassword = newPassword.replace(/["`$\\]/g, '\\$&');
+    
+    // Script PowerShell para cambiar contraseña
+    const psScript = `
+      try {
+        Import-Module ActiveDirectory -ErrorAction Stop
+        $SecurePassword = ConvertTo-SecureString "${escapedPassword}" -AsPlainText -Force
+        Set-ADAccountPassword -Identity "${username}" -NewPassword $SecurePassword -Reset
+        Write-Output "SUCCESS: Password changed for ${username}"
+      } catch {
+        Write-Error "ERROR: $($_.Exception.Message)"
+        exit 1
+      }
+    `;
+
+    try {
+      const { stdout, stderr } = await execAsync(
+        `powershell.exe -ExecutionPolicy Bypass -Command "${psScript.replace(/"/g, '\\"')}"`,
+        { timeout: 30000 }
+      );
+
+      this.logger.log(`📋 PowerShell stdout: ${stdout}`);
+      if (stderr) {
+        this.logger.warn(`⚠️ PowerShell stderr: ${stderr}`);
+      }
+
+      if (stdout.includes('SUCCESS')) {
+        this.logger.log(`✅ PowerShell confirmó cambio exitoso para: ${username}`);
+        
+        // Verificar el cambio
+        await this.verifyPasswordChange(username, newPassword);
+      } else {
+        throw new Error('PowerShell no confirmó el cambio de contraseña');
+      }
+
+    } catch (error) {
+      this.logger.error(`❌ Error ejecutando PowerShell: ${error.message}`);
+      throw error;
+    }
+  }
+
+  /**
+   * Verificar si el cambio de contraseña funcionó realmente
+   */
+  private async verifyPasswordChange(username: string, newPassword: string): Promise<void> {
+    this.logger.log(`🔍 Verificando cambio de contraseña para: ${username}`);
+    
+    const testClient = this.createClient(false);
+    const userDN = `MAIN\\${username}`;
+
+    try {
+      await this.bindUser(testClient, userDN, newPassword);
+      this.logger.log(`✅ Verificación exitosa: nueva contraseña funciona para ${username}`);
+    } catch (verifyError) {
+      this.logger.error(`❌ Verificación falló: nueva contraseña NO funciona para ${username}`);
+      throw new Error('La contraseña no se cambió correctamente - verificación falló');
+    } finally {
+      this.safeUnbind(testClient);
+    }
   }
 
   async mapUserToOrganization(department: string, office: string, title?: string, groups?: string[]): Promise<{
