@@ -42,7 +42,7 @@ export class PasswordPolicyService {
   // Lista de contraseñas comunes bloqueadas
   private readonly commonPasswords = [
     'password', 'password123', '123456', '123456789', 'qwerty', 'abc123',
-    'password1', 'admin', 'administrador', 'minoil', 'minoil123', 'welcome',
+    'password1', 'admin', 'administrador', 'minoil', 'welcome',
     'welcome123', 'changeme', 'letmein', 'master', 'secret', 'superman',
     'batman', 'dragon', 'monkey', 'computer', 'internet', 'service'
   ];

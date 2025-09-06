@@ -30,51 +30,7 @@ export class AuthController {
     summary: 'Cambiar contraseña de usuario LDAP',
     description: 'Permite a un usuario cambiar su contraseña en LDAP. Requiere la contraseña actual para verificación.'
   })
-  @ApiResponse({ 
-    status: 200, 
-    description: 'Contraseña cambiada exitosamente',
-    schema: {
-      type: 'object',
-      properties: {
-        success: { type: 'boolean', example: true },
-        message: { type: 'string', example: 'Contraseña cambiada exitosamente' }
-      }
-    }
-  })
-  @ApiBadRequestResponse({ 
-    description: 'Datos de entrada inválidos o contraseñas no coinciden',
-    schema: {
-      type: 'object',
-      properties: {
-        statusCode: { type: 'number', example: 400 },
-        message: { type: 'array', items: { type: 'string' } },
-        error: { type: 'string', example: 'Bad Request' }
-      }
-    }
-  })
-  @ApiUnauthorizedResponse({ 
-    description: 'Contraseña actual incorrecta o usuario no autorizado',
-    schema: {
-      type: 'object',
-      properties: {
-        statusCode: { type: 'number', example: 401 },
-        message: { type: 'string', example: 'Credenciales LDAP inválidas' },
-        error: { type: 'string', example: 'Unauthorized' }
-      }
-    }
-  })
-  async changePassword(
-    @Body() changePasswordDto: ChangePasswordDto,
-    @Req() request: Request
-  ) {
-    // Extraer información del cliente para auditoría
-    const clientIp = this.getClientIp(request);
-    const userAgent = request.headers['user-agent'];
-
-    // Usar la IP del DTO si está disponible, sino usar la detectada
-    const finalClientIp = changePasswordDto.clientIp || clientIp;
-    const finalUserAgent = changePasswordDto.userAgent || userAgent;
-
+  async changePassword(@Body() changePasswordDto: ChangePasswordDto) {
     return this.authService.changePassword(
       changePasswordDto.username,
       changePasswordDto.currentPassword,
@@ -83,38 +39,6 @@ export class AuthController {
     );
   }
 
-  @Post('validate-password')
-  @HttpCode(200)
-  @UsePipes(new ValidationPipe({ transform: true }))
-  @ApiOperation({ 
-    summary: 'Validar política de contraseña',
-    description: 'Valida si una contraseña cumple con la política de seguridad de Minoil antes de intentar cambiarla.'
-  })
-  @ApiResponse({ 
-    status: 200, 
-    description: 'Validación de contraseña completada',
-    schema: {
-      type: 'object',
-      properties: {
-        isValid: { type: 'boolean', example: true },
-        strength: { type: 'string', enum: ['weak', 'fair', 'good', 'strong'], example: 'strong' },
-        score: { type: 'number', minimum: 0, maximum: 100, example: 85 },
-        errors: { type: 'array', items: { type: 'string' }, example: [] },
-        suggestions: { type: 'array', items: { type: 'string' }, example: ['Use un gestor de contraseñas'] }
-      }
-    }
-  })
-  @ApiBadRequestResponse({ 
-    description: 'Datos de entrada inválidos',
-    schema: {
-      type: 'object',
-      properties: {
-        statusCode: { type: 'number', example: 400 },
-        message: { type: 'array', items: { type: 'string' } },
-        error: { type: 'string', example: 'Bad Request' }
-      }
-    }
-  })
   async validatePassword(@Body() validatePasswordDto: ValidatePasswordDto) {
     const userInfo = {
       username: validatePasswordDto.username,

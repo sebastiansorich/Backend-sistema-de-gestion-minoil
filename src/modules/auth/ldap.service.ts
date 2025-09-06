@@ -988,22 +988,22 @@ export class LdapService {
               this.logger.log(`✅ Contraseña cambiada exitosamente (admin SSL fallback) para usuario: ${username}`);
             }
           } else {
-                      // Usar método sin SSL directamente
-          this.logger.log(`🔧 Usando método sin SSL directamente para: ${username}`);
-          
-          // Primero intentar API REST
-          try {
-            await this.changePasswordViaAPI(username, currentPassword, newPassword);
-            this.logger.log(`✅ Contraseña cambiada exitosamente (API REST) para usuario: ${username}`);
-            return;
-          } catch (apiError) {
-            this.logger.warn(`⚠️ API REST falló: ${apiError.message}`);
-            this.logger.log(`🔄 Intentando método LDAP tradicional...`);
-          }
-          
-          // Fallback: método LDAP tradicional
-          await this.changePasswordWithoutSSL(userFullDN, newPassword, username);
-          this.logger.log(`✅ Contraseña cambiada exitosamente (admin sin SSL) para usuario: ${username}`);
+            // Usar método sin SSL directamente
+            this.logger.log(`🔧 Usando método sin SSL directamente para: ${username}`);
+            
+            // Primero intentar API REST
+            try {
+              await this.changePasswordViaAPI(username, currentPassword, newPassword);
+              this.logger.log(`✅ Contraseña cambiada exitosamente (API REST) para usuario: ${username}`);
+              return;
+            } catch (apiError) {
+              this.logger.warn(`⚠️ API REST falló: ${apiError.message}`);
+              this.logger.log(`🔄 Intentando método LDAP tradicional...`);
+            }
+            
+            // Fallback: método LDAP tradicional
+            await this.changePasswordWithoutSSL(userFullDN, newPassword, username);
+            this.logger.log(`✅ Contraseña cambiada exitosamente (admin sin SSL) para usuario: ${username}`);
           }
         } else {
           throw new Error('Credenciales de administrador LDAP no configuradas');
@@ -1196,16 +1196,7 @@ export class LdapService {
   private async changePasswordWithoutSSL(userDN: string, newPassword: string, username: string): Promise<void> {
     this.logger.log(`🔧 Intentando cambio de contraseña con PowerShell para: ${username}`);
     
-    // Primero intentar método LDAP tradicional
-    try {
-      await this.changePasswordWithLDAP(userDN, newPassword, username);
-      return;
-    } catch (ldapError) {
-      this.logger.warn(`⚠️ Método LDAP falló: ${ldapError.message}`);
-      this.logger.log(`🔄 Intentando con PowerShell como alternativa...`);
-    }
-
-    // Fallback: usar PowerShell para cambiar contraseña
+    // Usar PowerShell directamente (más confiable)
     try {
       await this.changePasswordWithPowerShell(username, newPassword);
       this.logger.log(`✅ Contraseña cambiada exitosamente con PowerShell para: ${username}`);
