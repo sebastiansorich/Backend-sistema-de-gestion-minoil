@@ -1867,6 +1867,91 @@ export class SapHanaService {
     }
   }
 
+  async obtenerChoperasConUltimoMantenimiento(): Promise<any[]> {
+    this.logger.log('🍺 Obteniendo choperas con último mantenimiento...');
+    
+    try {
+      // Paso 1: Obtener choperas del procedimiento
+      const choperasResult = await this.executeQuery(`call "MINOILDES"."ListadoChoperas"(0)`);
+      this.logger.log(`✅ Obtenidas ${choperasResult.length} choperas`);
+
+      // Paso 2: Obtener últimos mantenimientos con información de usuarios y tipos
+      const mantenimientosQuery = `
+        WITH UltimosMantenimientos AS (
+          SELECT 
+            m."choperaId",
+            m."id" as ultimo_mantenimiento_id,
+            m."usuarioId",
+            m."fechaVisita",
+            m."createdAt" as fechaCreacion,
+            m."estadoGeneral",
+            m."tipoMantenimientoId",
+            ROW_NUMBER() OVER (
+              PARTITION BY m."choperaId" 
+              ORDER BY m."fechaVisita" DESC, m."createdAt" DESC
+            ) as rn
+          FROM "MINOILDES"."mantenimientos_choperas" m
+        )
+        SELECT 
+          um."choperaId",
+          um.ultimo_mantenimiento_id,
+          um."usuarioId" as tecnico_id,
+          um."fechaVisita",
+          um.fechaCreacion,
+          um."estadoGeneral",
+          um."tipoMantenimientoId",
+          u."nombre" as tecnico_nombre,
+          u."apellido" as tecnico_apellido,
+          tm."nombre" as tipo_mantenimiento
+        FROM UltimosMantenimientos um
+        LEFT JOIN "MINOILDES"."users" u ON um."usuarioId" = u."id"
+        LEFT JOIN "MINOILDES"."tipos_mantenimiento" tm ON um."tipoMantenimientoId" = tm."id"
+        WHERE um.rn = 1
+      `;
+
+      const mantenimientosResult = await this.executeQuery(mantenimientosQuery);
+      this.logger.log(`✅ Obtenidos ${mantenimientosResult.length} últimos mantenimientos`);
+
+      // Crear mapa de mantenimientos por serie
+      const mantenimientosMap = new Map();
+      mantenimientosResult.forEach(m => {
+        const key = m.choperaId?.trim();
+        mantenimientosMap.set(key, m);
+      });
+
+      // Combinar choperas con mantenimientos
+      const resultado = choperasResult.map(chopera => {
+        const serieKey = chopera.SerieActivo?.trim();
+        const mantenimiento = mantenimientosMap.get(serieKey);
+        
+        return {
+          ItemCode: chopera.ItemCode?.trim() || '',
+          ItemName: chopera.ItemName?.trim() || '',
+          Status: chopera.Status?.trim() || '',
+          Ciudad: chopera.Ciudad?.trim() || '',
+          SerieActivo: chopera.SerieActivo?.trim() || '',
+          CardCode: chopera.CardCode?.trim() || '',
+          CardName: chopera.CardName?.trim() || '',
+          AliasName: chopera.AliasName?.trim() || '',
+          // Información del último mantenimiento (si existe) - USANDO NOMBRES EN MAYÚSCULAS
+          ultimo_mantenimiento_id: mantenimiento?.ULTIMO_MANTENIMIENTO_ID || null,
+          fechaVisita: mantenimiento?.fechaVisita || null,
+          fechaCreacion: mantenimiento?.FECHACREACION || null,
+          tecnico_id: mantenimiento?.TECNICO_ID || null,
+          tecnico_nombre: mantenimiento?.TECNICO_NOMBRE?.trim() || null,
+          tecnico_apellido: mantenimiento?.TECNICO_APELLIDO?.trim() || null,
+          estadoGeneral: mantenimiento?.estadoGeneral?.trim() || null,
+          tipo_mantenimiento: mantenimiento?.TIPO_MANTENIMIENTO?.trim() || null,
+        };
+      });
+
+      return resultado;
+    } catch (error) {
+      this.logger.error('Error obteniendo choperas con último mantenimiento:', error);
+      throw error;
+    }
+  }
+
   // ============================================================================
   // 📋 MÉTODOS PARA RESPUESTAS DE CHECKLIST
   // ============================================================================

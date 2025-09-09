@@ -188,6 +188,32 @@ export class ChoperasController {
     }
   }
 
+  @Get('con-mantenimientos')
+  @ApiOperation({ 
+    summary: 'Obtener choperas con información de mantenimientos',
+    description: 'Retorna todas las choperas con información de su último mantenimiento, técnico responsable y estado de pendencia'
+  })
+  @ApiResponse({ status: 200, description: 'Choperas con mantenimientos obtenidas exitosamente' })
+  @ApiResponse({ status: 500, description: 'Error al obtener choperas con mantenimientos' })
+  async findAllConMantenimientos() {
+    try {
+      const choperasConMantenimientos = await this.choperasService.obtenerChoperasConMantenimientos();
+      
+      return {
+        success: true,
+        data: choperasConMantenimientos,
+        total: choperasConMantenimientos.length,
+        message: 'Choperas con información de mantenimientos obtenidas exitosamente'
+      };
+    } catch (error) {
+      return {
+        success: false,
+        error: error.message,
+        message: 'Error al obtener choperas con mantenimientos'
+      };
+    }
+  }
+
   @Get('codigo/:itemCode')
   @ApiOperation({ 
     summary: 'Obtener una chopera por código de SAP',

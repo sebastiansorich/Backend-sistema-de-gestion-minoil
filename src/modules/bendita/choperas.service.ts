@@ -126,6 +126,56 @@ export class ChoperasService {
   }
 
   /**
+   * Obtiene choperas con información de su último mantenimiento
+   */
+  async obtenerChoperasConMantenimientos(): Promise<any[]> {
+    this.logger.log('🍺 Obteniendo choperas con información de mantenimientos...');
+    
+    try {
+      const choperasConMantenimientos = await this.sapHanaService.obtenerChoperasConUltimoMantenimiento();
+      this.logger.log(`✅ Obtenidas ${choperasConMantenimientos.length} choperas con mantenimientos`);
+      
+      return choperasConMantenimientos.map(item => {
+        // Calcular días desde último mantenimiento
+        const diasDesdeUltimo = item.fechaVisita 
+          ? Math.floor((new Date().getTime() - new Date(item.fechaVisita).getTime()) / (1000 * 60 * 60 * 24))
+          : 999;
+
+        // Determinar si es pendiente (más de 30 días o sin mantenimiento)
+        const esPendiente = !item.fechaVisita || diasDesdeUltimo > 30;
+
+        return {
+          itemCode: item.ItemCode,
+          itemName: item.ItemName,
+          status: item.Status,
+          ciudad: item.Ciudad,
+          serieActivo: item.SerieActivo,
+          cardCode: item.CardCode || '',
+          cardName: item.CardName || '',
+          aliasName: item.AliasName || '',
+          ultimoMantenimiento: item.ultimo_mantenimiento_id ? {
+            id: item.ultimo_mantenimiento_id,
+            fechaVisita: item.fechaVisita,
+            fechaCreacion: item.fechaCreacion,
+            tecnico: {
+              id: item.tecnico_id,
+              nombre: item.tecnico_nombre,
+              apellido: item.tecnico_apellido
+            },
+            tipoMantenimiento: item.tipo_mantenimiento || 'Sin tipo',
+            estadoGeneral: item.estadoGeneral,
+            esPendiente,
+            diasDesdeUltimo
+          } : null
+        };
+      });
+    } catch (error) {
+      this.logger.error('Error obteniendo choperas con mantenimientos:', error);
+      throw error;
+    }
+  }
+
+  /**
    * Obtiene estadísticas de choperas
    */
   async obtenerEstadisticas(): Promise<any> {
