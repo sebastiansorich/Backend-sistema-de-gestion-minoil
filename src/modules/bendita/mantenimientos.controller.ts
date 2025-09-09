@@ -14,18 +14,18 @@ export class MantenimientosController {
   @Post()
   @ApiOperation({ 
     summary: 'Registrar nuevo mantenimiento de chopera',
-    description: 'Crea un nuevo registro de mantenimiento para una chopera específica con checklist y evaluación sensorial'
+    description: 'Crea un nuevo registro de mantenimiento para una chopera específica con checklist y evaluación sensorial. El mantenimiento debe estar asignado a un usuario válido existente en el sistema.'
   })
   @ApiResponse({ status: 201, description: 'Mantenimiento registrado exitosamente' })
-  @ApiResponse({ status: 400, description: 'Datos inválidos o fecha futura' })
-  @ApiResponse({ status: 404, description: 'Usuario o chopera no encontrado' })
+  @ApiResponse({ status: 400, description: 'Datos inválidos, fecha futura o usuario inválido' })
+  @ApiResponse({ status: 404, description: 'Usuario o chopera no encontrado en el sistema' })
   async create(@Request() req, @Body() createMantenimientoDto: CreateMantenimientoDto) {
     try {
       console.log('🎯 Controlador: Iniciando creación de mantenimiento');
       
-      // Usar siempre el usuario sistema por defecto
-      const usuarioId = 1729; // Usuario sistema
-      console.log('👤 Controlador: Usando usuario sistema ID:', usuarioId);
+      // Usar el usuario ID del DTO
+      const usuarioId = createMantenimientoDto.usuarioId;
+      console.log('👤 Controlador: Usando usuario ID:', usuarioId);
       
       return this.mantenimientosService.create(createMantenimientoDto, usuarioId);
     } catch (error) {

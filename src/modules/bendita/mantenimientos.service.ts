@@ -49,7 +49,7 @@ export interface Usuario {
   id: number;
   nombre: string;
   apellido: string;
-  email?: string;
+  email: string;
 }
 
 export interface Chopera {
@@ -76,33 +76,16 @@ export class MantenimientosService {
       console.log('📋 DTO recibido:', JSON.stringify(createMantenimientoDto, null, 2));
       console.log('👤 Usuario ID:', usuarioId);
       
-      // Verificar que el usuario existe en SAP HANA (opcional)
-      let usuario = null;
-      try {
-        console.log('🔍 Buscando usuario en SAP HANA...');
-        usuario = await this.sapHanaService.obtenerUsuarioPorId(usuarioId);
-        console.log('✅ Usuario encontrado en SAP HANA:', usuario);
-        
-        // Si el usuario es null, crear uno por defecto
-        if (!usuario) {
-          console.log('⚠️ Usuario no encontrado en SAP HANA, creando usuario por defecto...');
-          usuario = {
-            id: usuarioId,
-            nombre: 'Usuario',
-            apellido: 'Sistema',
-            email: 'usuario@minoil.com.bo'
-          };
-        }
-      } catch (error) {
-        console.log('⚠️ Error obteniendo usuario de SAP HANA, creando usuario por defecto...');
-        // Si no se puede obtener el usuario de SAP HANA, crear uno por defecto
-        usuario = {
-          id: usuarioId,
-          nombre: 'Usuario',
-          apellido: 'Sistema',
-          email: 'usuario@minoil.com.bo'
-        };
+      // Verificar que el usuario existe en SAP HANA (obligatorio)
+      console.log('🔍 Verificando que el usuario existe en SAP HANA...');
+      const usuario = await this.sapHanaService.obtenerUsuarioPorId(usuarioId);
+      
+      if (!usuario) {
+        console.log('❌ Usuario no encontrado en SAP HANA');
+        throw new NotFoundException(`Usuario con ID ${usuarioId} no encontrado. El mantenimiento debe ser asignado a un usuario válido.`);
       }
+      
+      console.log('✅ Usuario encontrado en SAP HANA:', usuario.nombre, usuario.apellido);
 
       // Verificar que la chopera existe en SAP
       console.log('🔍 Buscando chopera con ItemCode:', createMantenimientoDto.itemCode);
@@ -215,10 +198,12 @@ export class MantenimientosService {
           id: usuario.id,
           nombre: usuario.nombre,
           apellido: usuario.apellido,
+          email: usuario.email,
         } : {
           id: mantenimiento.usuarioId,
-          nombre: 'Usuario',
-          apellido: 'Sistema',
+          nombre: 'Usuario No Encontrado',
+          apellido: `(ID: ${mantenimiento.usuarioId})`,
+          email: 'no-encontrado@minoil.com.bo',
         },
         chopera: chopera ? {
           itemCode: chopera.itemCode,
@@ -255,8 +240,9 @@ export class MantenimientosService {
         ...mantenimiento,
         usuario: {
           id: mantenimiento.usuarioId,
-          nombre: 'Usuario',
-          apellido: 'Sistema',
+          nombre: 'Usuario No Encontrado',
+          apellido: `(ID: ${mantenimiento.usuarioId})`,
+          email: 'no-encontrado@minoil.com.bo',
         },
         chopera: {
           itemCode: mantenimiento.itemCode,

@@ -56,6 +56,14 @@ export class RespuestaSensorialDto {
 
 export class CreateMantenimientoDto {
   @ApiProperty({ 
+    example: 1, 
+    description: 'ID del usuario que realiza el mantenimiento',
+    minimum: 1
+  })
+  @IsInt()
+  usuarioId: number;
+
+  @ApiProperty({ 
     example: '2024-12-20', 
     description: 'Fecha de la visita de mantenimiento (formato YYYY-MM-DD)',
     pattern: '^\\d{4}-\\d{2}-\\d{2}$'
