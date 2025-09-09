@@ -44,14 +44,14 @@ export class MantenimientosController {
     return this.mantenimientosService.findAll();
   }
 
-  @Get('chopera/:itemCode')
+  @Get('chopera/:serieActivo')
   @ApiOperation({ 
     summary: 'Obtener mantenimientos por chopera',
-    description: 'Filtra los mantenimientos por el ItemCode de la chopera específica'
+    description: 'Filtra los mantenimientos por el serieActivo (identificador único) de la chopera específica'
   })
   @ApiResponse({ status: 200, description: 'Mantenimientos de la chopera obtenidos exitosamente' })
-  findByChopera(@Param('itemCode') itemCode: string) {
-    return this.mantenimientosService.findByChopera(itemCode);
+  findByChopera(@Param('serieActivo') serieActivo: string) {
+    return this.mantenimientosService.findByChopera(serieActivo);
   }
 
   @Get('usuario/:usuarioId')

@@ -326,9 +326,9 @@ export class MantenimientosService {
     }
   }
 
-  async findByChopera(itemCode: string): Promise<Mantenimiento[]> {
+  async findByChopera(serieActivo: string): Promise<Mantenimiento[]> {
     try {
-      const mantenimientos = await this.sapHanaService.obtenerMantenimientosPorChopera(itemCode);
+      const mantenimientos = await this.sapHanaService.obtenerMantenimientosPorChopera(serieActivo);
       
       // Enriquecer con información de usuario, chopera y respuestas
       const mantenimientosEnriquecidos = await Promise.all(

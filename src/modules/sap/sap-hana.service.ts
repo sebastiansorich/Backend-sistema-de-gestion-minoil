@@ -1789,18 +1789,18 @@ export class SapHanaService {
     }
   }
 
-  async obtenerMantenimientosPorChopera(itemCode: string): Promise<any[]> {
+  async obtenerMantenimientosPorChopera(serieActivo: string): Promise<any[]> {
     const query = `
       SELECT "id", "usuarioId", "fechaVisita", "clienteCodigo", "ItemCode", "choperaId", 
              "tipoMantenimientoId", "estadoGeneral", "comentarioEstado", "comentarioCalidadCerveza", 
              "createdAt", "updatedAt"
       FROM "MINOILDES"."mantenimientos_choperas"
-      WHERE "ItemCode" = ?
+      WHERE "choperaId" = ?
       ORDER BY "fechaVisita" DESC
     `;
     
     try {
-      const result = await this.executeQuery(query, [itemCode]);
+      const result = await this.executeQuery(query, [serieActivo]);
       return result.map(row => ({
         ...row,
         itemCode: row.ItemCode, // Mapear ItemCode a itemCode para mantener compatibilidad
